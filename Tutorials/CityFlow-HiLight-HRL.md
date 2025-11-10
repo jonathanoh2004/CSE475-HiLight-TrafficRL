@@ -1,3 +1,4 @@
+# CityFlow-HiLight-HRL
 A hierarchical reinforcement learning (HRL) framework for **multi-intersection traffic signal control** using the **HiLight** architecture, implemented and evaluated in the **CityFlow** simulator.  
 This repository is built for research and experimentation with high-level (regional) and low-level (intersection) agent coordination for dynamic traffic signal optimization.
 
