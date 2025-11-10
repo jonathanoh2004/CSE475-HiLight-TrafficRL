@@ -143,19 +143,6 @@ print("✅ CityFlow ran 5 simulation steps successfully!")
 
 You should see the confirmation message without errors.
 
-## Step 8 Access Ubuntu Files from Windows
-
-Your Linux files are accessible through File Explorer:
-
-`\\wsl$\Ubuntu-20.04\home\<your_username>\cityflow_env`
-
-You can open this path in VS Code (with the Remote WSL extension) or drag files in/out just like normal.
-
-If you ever want to see your Windows Desktop from Ubuntu:
-
-`cd /mnt/c/Users/<YourWindowsUser>/Desktop`
-
-
 > [!WARNING]  
 > **CityFlow “cannot open roadnet file” or “load config failed” error**  
 >  
@@ -187,6 +174,19 @@ If you ever want to see your Windows Desktop from Ubuntu:
 > >>> print("✅ CityFlow simulation ran successfully!")
 > ```
 > You should no longer see any “roadnet file error!” messages.
+
+## Step 8 Access Ubuntu Files from Windows
+
+Your Linux files are accessible through File Explorer:
+
+`\\wsl$\Ubuntu-20.04\home\<your_username>\cityflow_env`
+
+You can open this path in VS Code (with the Remote WSL extension) or drag files in/out just like normal.
+
+If you ever want to see your Windows Desktop from Ubuntu:
+
+`cd /mnt/c/Users/<YourWindowsUser>/Desktop`
+
 
 
 ## Reference:
