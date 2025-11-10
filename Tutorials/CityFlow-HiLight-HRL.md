@@ -156,6 +156,38 @@ If you ever want to see your Windows Desktop from Ubuntu:
 `cd /mnt/c/Users/<YourWindowsUser>/Desktop`
 
 
+> [!WARNING]  
+> **CityFlow “cannot open roadnet file” or “load config failed” error**  
+>  
+> This usually happens when the paths inside `config.json` don’t match the actual file locations.  
+>  
+> Example problem:
+> ```json
+> "dir": "examples/",
+> "roadnetFile": "roadnet.json",
+> "flowFile": "flow.json"
+> ```
+> CityFlow will look for files in `examples/examples/roadnet.json`, which doesn’t exist.  
+>  
+> ✅ **Fix:**  
+> Edit the config so `"dir"` points to the current folder:
+> ```json
+> "dir": "./",
+> "roadnetFile": "roadnet.json",
+> "flowFile": "flow.json"
+> ```
+> Then re-run:
+> ```bash
+> python
+> >>> import cityflow
+> >>> eng = cityflow.Engine("config.json", thread_num=1)
+> >>> for i in range(5):
+> ...     eng.next_step()
+> ...
+> >>> print("✅ CityFlow simulation ran successfully!")
+> ```
+> You should no longer see any “roadnet file error!” messages.
+
 
 ## Reference:
 https://medium.com/@EvanMath/how-to-install-the-cityflow-simulator-in-windows-11-a89ef4ea2397
