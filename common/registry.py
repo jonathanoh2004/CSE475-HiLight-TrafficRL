@@ -67,5 +67,9 @@ class Registry:
             return f
         return wrap
 
+    @classmethod
+    def get_model(cls, name):
+        return cls.mapping['model_mapping'][name]
+
 
 Registry()

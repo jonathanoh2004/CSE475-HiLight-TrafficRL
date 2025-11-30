@@ -1,55 +1,84 @@
 from common.registry import Registry
+from .base import BaseAgent
+import numpy as np
 
 
 @Registry.register_model('hilight')
 class HilightAgent(BaseAgent):
-    def __init__(self, world, metric, agent_config_path="urban.json"):
+    def __init__(self, world, metric, flow_path="flow.json"):
         super().__init__(world)
         self.world = world
         self.eng = world.eng
         self.metric = metric
 
-        # ---- Models ----
-        self.meta_transformer = ...
-        self.meta_lstm = ...
-        self.local_mlp = ...
-        self.gat = ...
-        self.actor = ...
-        self.critic = ...
+        # # ---- Models ----
+        # self.meta_transformer = ...
+        # self.meta_lstm = ...
+        # self.local_mlp = ...
+        # self.gat = ...
+        # self.actor = ...
+        # self.critic = ...
 
-        # ---- Buffers ----
-        self.regional_window = deque(maxlen=20)
-        self.sub_buffer = ReplayBuffer(...)
-        self.meta_buffer = ReplayBuffer(...)
+        # # ---- Buffers ----
+        # self.regional_window = deque(maxlen=20)
+        # self.sub_buffer = ReplayBuffer(...)
+        # self.meta_buffer = ReplayBuffer(...)
 
-        # ---- Bookkeeping ----
-        self.current_goal = None
-        self.current_step = 0
-        self.meta_interval = 5
+        # # ---- Bookkeeping ----
+        # self.current_goal = None
+        # self.current_step = 0
+        # self.meta_interval = 5
         
         # --- load vehicle length & minGap from agent config ---
         import json, math
-        with open(agent_config_path) as f:
+        with open(flow_path) as f:
             cfg = json.load(f)
-        self.vehicle_length = cfg["vehicle"]["length"]
-        self.min_gap = cfg["vehicle"]["carFollow"]["minGap"]
+        
+        # NEW: handle list (flow.json) vs dict
+        if isinstance(cfg, list):
+            # take the first flow entry as representative
+            cfg_vehicle = cfg[0]["vehicle"]
+        else:
+            cfg_vehicle = cfg["vehicle"]
 
+        self.vehicle_length = cfg_vehicle["length"]
+
+        # handle both formats:
+        # - traffic sim configs with "carFollow": {"minGap": ...}
+        # - flow.json with "minGap" directly under "vehicle"
+        car_follow = cfg_vehicle.get("carFollow")
+        if car_follow is not None and "minGap" in car_follow:
+            self.min_gap = car_follow["minGap"]
+        else:
+            self.min_gap = cfg_vehicle["minGap"]
+    
         # --- lane capacity ---
         self.lane_capacity = {}
-        for lane_id in self.world.lane_ids:
-            lane_length = self.eng.get_lane_length(lane_id)
+
+        for lane_id, lane_length in self.world.lane_length.items():
             self.lane_capacity[lane_id] = math.floor(
                 lane_length / (self.vehicle_length + self.min_gap)
             )
 
-        # --- intersection -> incoming lanes mapping ---
-        self.inter_in_lanes = self.world.in_lanes 
+        # # --- intersection -> incoming lanes mapping ---
+        self.inter_in_lanes = {}
+        for inter in self.world.intersections:          # Intersection objects
+            inter_in_lanes = []
+            for road in inter.in_roads:
+                # same direction logic as get_in_out_lanes
+                from_zero = (road["startIntersection"] == inter.id) if self.world.RIGHT else (
+                            road["endIntersection"] == inter.id)
+                lane_indices = range(len(road["lanes"])) if from_zero else range(len(road["lanes"]) - 1, -1, -1)
+                for n in lane_indices:
+                    lane_id = f'{road["id"]}_{n}'
+                    inter_in_lanes.append(lane_id)
+            self.inter_in_lanes[inter.id] = inter_in_lanes
 
-        # --- regions & regional window for meta-policy ---
-        self.region_of_inter = self._build_region_mapping() # to be implemented
-        self.region_coords = self._compute_region_coords() # to be implemented
-        from collections import deque
-        self.regional_window = deque(maxlen=20)
+        # # --- regions & regional window for meta-policy ---
+        # self.region_of_inter = self._build_region_mapping() # to be implemented
+        # self.region_coords = self._compute_region_coords() # to be implemented
+        # from collections import deque
+        # self.regional_window = deque(maxlen=20)
 
     def get_ob(self):
 
@@ -74,11 +103,11 @@ class HilightAgent(BaseAgent):
 
         # ---------- RAW LANE-LEVEL QUANTITIES FROM ENVIRONMENT ----------
         # car_num: total number of vehicles on each lane
-        lane_vehicle_count = world.get_lane_vehicle_count()  # {lane_id: int}
+        lane_vehicle_count = eng.get_lane_vehicle_count()  # {lane_id: int}
 
         # queue_length: length of queue in meters for each incoming lane
         # (assumed to already be in meters and lane-indexed)
-        lane_queue_length = metric.queue()  # {lane_id: float (meters)}
+        lane_queue_count = world.info_functions["lane_waiting_count"]()
 
         # waiting time & delay etc. (APIs may differ slightly per env)
         # lane_wait_time_first: waiting time of *first vehicle* per lane
@@ -91,7 +120,7 @@ class HilightAgent(BaseAgent):
         #
         lane_vehicles = eng.get_lane_vehicles()  # {lane_id: [veh_id]}
         vehicle_speed = eng.get_vehicle_speed()  # {veh_id: float (m/s)}
-        vehicle_wait_time = eng.get_vehicle_waiting_time()
+        vehicle_wait_time = world.get_vehicle_waiting_time()
 
         # flow: number of vehicles passing through per unit time
         # We assume world.get_cur_throughput() gives per-lane flow for current step.
@@ -103,7 +132,7 @@ class HilightAgent(BaseAgent):
         lane_pressure = world.get_lane_pressure()  # {lane_id: float}
 
         # delay_time: actual − ideal travel time per lane (assumed to be provided)
-        lane_delay = world.info_functions["lane_delay"]  # {lane_id: float}
+        lane_delay = world.info_functions["lane_delay"]()  # {lane_id: float}
 
         # ---------- BUILD PER-INTERSECTION, PER-LANE FEATURES ----------
         sub_obs_list = []
@@ -120,7 +149,8 @@ class HilightAgent(BaseAgent):
                 car_num = int(lane_vehicle_count.get(lane_id, 0))
 
                 # 2) queue_length: queue length in meters
-                q_len = float(lane_queue_length.get(lane_id, 0.0))
+                waiting_count = lane_queue_count.get(lane_id, 0)
+                q_len = waiting_count * self.vehicle_length
 
                 # 3) occupancy: (# vehicles) / (lane capacity)
                 occupancy = float(car_num) / float(cap)
