@@ -418,17 +418,17 @@ class World(object):
         if best_factors is None:
             raise ValueError("Could not find valid factor pair for n = {}".format(n))
 
-        self.region_adj_matrix = [[] for _ in range(best_factors[0])]
+        self.region_grid = [[] for _ in range(best_factors[0])]
         if n % best_factors[0] != 0:
-            self.region_adj_matrix.append([])
+            self.region_grid.append([])
 
         for i in range(best_factors[0]):
             for _ in range(best_factors[1]):
-                self.region_adj_matrix[i].append(0)
+                self.region_grid[i].append(0)
 
         multiplier = 0
         for i in range(best_factors[1]):
-            self.region_adj_matrix[i] = [
+            self.region_grid[i] = [
                 x_list[multiplier * best_factors[0] + ind][1] for ind in range(best_factors[1])]
 
             curr_x = {}
@@ -438,14 +438,19 @@ class World(object):
             for j in range(n):
                 if y_list[j][1] in curr_x:
                     col_ind = j // best_factors[0]
-                    self.region_adj_matrix[i][col_ind] = y_list[j][1]
+                    self.region_grid[i][col_ind] = y_list[j][1]
 
             multiplier += 1
 
         start = best_factors[0] * best_factors[1] - 1
         for j in range(n % best_factors[0]):
-            self.region_adj_matrix[best_factors[0] + 1][j] = [
+            self.region_grid[best_factors[0] + 1][j] = [
                 x_list[start + i] for i in range(n % best_factors[0])]
+
+        self.region_ids = []
+        for i in range(len(self.region_grid)):
+            for j in range(len(self.region_grid[i])):
+                self.region_ids.append(str(i) + "_" + str(j))
 
         # initializing info functions
         self.info_functions = {
@@ -606,7 +611,8 @@ class World(object):
 
         return total
 
-    
+    def get_region_coords(self, region_id):
+
 
     def get_cur_throughput(self):
         '''
@@ -622,6 +628,8 @@ class World(object):
             if (not np.isnan(vehicle["cost_time"])) and vehicle["leave_time"] <= self.eng.get_current_time():
                 throughput += 1
         return throughput
+
+
 
     def get_executed_action(self):
         '''
