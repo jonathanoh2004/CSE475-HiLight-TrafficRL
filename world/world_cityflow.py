@@ -290,6 +290,163 @@ class World(object):
 
         print("roads parsed.")
 
+        self.intersection_adj_dict = {}
+        for i in self.intersection_ids:
+            self.intersection_adj_dict[i] = {}
+            for j in self.intersection_ids:
+                self.intersection_adj_dict[i][j] = False
+
+        for _id in self.intersection_ids:
+            intersection = self.id2intersection[_id]
+            for road in intersection.roads:
+                start_id = road["startIntersection"]
+                end_id = road["endIntersection"]
+
+                if start_id == _id:
+                    self.intersection_adj_dict[_id][end_id] = True
+                else:
+                    self.intersection_adj_dict[_id][start_id] = True
+
+        print("roads parsed.")
+
+        self.region = {}
+        self.intersection_id2region_id = {i.id: None for i in self.intersections}
+        self.region_id2intersection_list = {i.id: [] for i in self.intersections}
+
+        self.intersection_adj_dict = {"": {}}
+        for i in self.intersection_ids:
+            for j in self.intersection_ids:
+                self.intersection_adj_dict[i][j] = False
+
+        for _id in self.intersection_ids:
+            intersection = self.id2intersection[_id]
+            for road in intersection.roads:
+                if road["startIntersection"].id == _id:
+                    self.intersection_adj_dict[_id][road["endIntersection"].id] = True
+                else:
+                    self.intersection_adj_dict[_id][road["startIntersection"].id] = True
+
+        import random
+        seeds = []
+        seeds.append(self.intersection_ids[random.randint(0, len(self.intersection_ids) - 1)])
+        intersections_per_region = 4
+        num_regions = len(self.intersection_ids) // intersections_per_region
+
+        from collections import deque
+
+        seed_to_seen_hops = {}
+        while True:
+            seed_to_seen_hops[seeds[len(seeds) - 1]] = {_id: 0 for _id in self.intersection_ids}
+
+            hops_total = {_id: 0 for _id in self.intersection_ids}
+            seen_hops = {_seed: {_id: 0 for _id in self.intersection_ids} for _seed in seeds}
+            for seed in seeds:
+                queue = deque()
+                queue.append(seed)
+
+                while len(queue) > 0:
+                    curr_intersection_id = queue.popleft()
+                    for _id in self.intersection_adj_dict[curr_intersection_id]:
+                        if (self.intersection_adj_dict[curr_intersection_id][_id] == True
+                                and seen_hops[seed][_id] == 0):
+                            seen_hops[seed][_id] = seen_hops[seed][curr_intersection_id] + 1
+                            hops_total[_id] += seen_hops[seed][_id]
+                            queue.append(_id)
+
+            max_hops = 0
+            for _id in self.intersection_ids:
+                if max_hops < hops_total[_id]:
+                    max_hops = hops_total[_id]
+
+            candidates = []
+            for _id in self.intersection_ids:
+                if hops_total[_id] == max_hops:
+                    candidates.append(_id)
+
+            if len(candidates) == 0:
+                break
+            else:
+                seeds.append(candidates[0])
+
+            if len(seeds) == num_regions:
+                break
+
+        queue = deque(seeds)
+        seen = {_id: False for _id in self.intersection_ids}
+        while len(queue) > 0:
+            curr_intersection_id = queue.popleft()
+            for road in self.id2intersection[curr_intersection_id].roads:
+                if road["startIntersection"] != curr_intersection_id:
+                    neighbor = road["startIntersection"]
+                else:
+                    neighbor = road["endIntersection"]
+
+                if not seen[neighbor]:
+                    queue.append(neighbor)
+                    seen[neighbor] = True
+                    self.region_id2intersection_list[self.intersection_id2region_id[
+                        curr_intersection_id]].append(neighbor)
+                    self.intersection_id2region_id[neighbor] = self.intersection_id2region_id[curr_intersection_id]
+
+        x_list = []
+        y_list = []
+        for intersection in self.roadnet["intersections"]:
+            if intersection['id'] in seeds:
+                x_list.append((intersection['point']["x"], intersection['id']))
+                y_list.append((intersection['point']["y"], intersection['id']))
+
+        x_list = sorted(x_list)
+        y_list = sorted(y_list)
+
+        n = len(self.intersection_ids)
+        factors = []
+        factor_counts = [0 for _ in range(n + 1)]
+        for i in range(1, n + 1):
+            if n % i == 0:
+                factors.append(i)
+                factor_counts[i] += 1
+
+        min_diff = 100000
+        best_factors = None
+        for factor in factors:
+            for factor2 in factors:
+                if factor != factor2 or factor_counts[factor] > 1:
+                    if factor * factor2 == n and factor - factor2 < min_diff:
+                        min_diff = factor - factor2
+                        best_factors = (factor, factor2)
+
+        if best_factors is None:
+            raise ValueError("Could not find valid factor pair for n = {}".format(n))
+
+        self.region_adj_matrix = [[] for _ in range(best_factors[0])]
+        if n % best_factors[0] != 0:
+            self.region_adj_matrix.append([])
+
+        for i in range(best_factors[0]):
+            for _ in range(best_factors[1]):
+                self.region_adj_matrix[i].append(0)
+
+        multiplier = 0
+        for i in range(best_factors[1]):
+            self.region_adj_matrix[i] = [
+                x_list[multiplier * best_factors[0] + ind][1] for ind in range(best_factors[1])]
+
+            curr_x = {}
+            for j in range(best_factors[1]):
+                curr_x[x_list[best_factors[0] * multiplier + j][1]] = j
+
+            for j in range(n):
+                if y_list[j][1] in curr_x:
+                    col_ind = j // best_factors[0]
+                    self.region_adj_matrix[i][col_ind] = y_list[j][1]
+
+            multiplier += 1
+
+        start = best_factors[0] * best_factors[1] - 1
+        for j in range(n % best_factors[0]):
+            self.region_adj_matrix[best_factors[0] + 1][j] = [
+                x_list[start + i] for i in range(n % best_factors[0])]
+
         # initializing info functions
         self.info_functions = {
             "vehicles": (lambda: self.eng.get_vehicles(include_waiting=True)),
@@ -407,6 +564,44 @@ class World(object):
             set(self.list_lane_vehicle_previous_step) - set(self.list_lane_vehicle_current_step))
         self._update_arrive_time(list_vehicle_new_arrive)
         self._update_left_time(list_vehicle_new_left)
+
+    def get_cur_region_stop_car_num(self, region):
+        '''
+        get_cur_region_stop_car_num
+        Get stop_car_num of selected region.
+
+        :param region: region of the network
+        :return: stop_car_num for the selected region
+        '''
+        lane_vehicles = self.eng.get_lane_vehicles()
+        vehicle_speed = self.eng.get_vehicle_speed()
+        total = 0
+        for intersection in self.region_id2intersection_id[region]:
+            for road in self.id2intersection[intersection].roads:
+                for lane in road.lanes:
+                    for vehicle in lane_vehicles[lane]:
+                        if vehicle_speed[vehicle] < 0.1:
+                            total += 1
+
+        return total
+
+    def get_cur_region_waiting_time(self, region):
+        '''
+        get_cur_region_waiting_time
+        Get waiting_time of selected region.
+
+        :param region: region of the network
+        :return: waiting_time of selected region
+        '''
+        lane_waiting_time = self.eng.get_lane_waiting_time_count()
+        total = 0
+        for intersection in self.region_id2intersection_id[region]:
+            for road in self.id2intersection[intersection].roads:
+                for lane in road.lanes:
+                    total += lane_waiting_time[lane]
+
+        return total
+
     
 
     def get_cur_throughput(self):
