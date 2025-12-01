@@ -34,9 +34,8 @@ class HilightAgent(BaseAgent):
         with open(flow_path) as f:
             cfg = json.load(f)
         
-        # NEW: handle list (flow.json) vs dict
         if isinstance(cfg, list):
-            # take the first flow entry as representative
+            # take the first flow entry as representative, i don't know if i should gather all vehicles lengths in the simulator and average them
             cfg_vehicle = cfg[0]["vehicle"]
         else:
             cfg_vehicle = cfg["vehicle"]
@@ -60,7 +59,7 @@ class HilightAgent(BaseAgent):
                 lane_length / (self.vehicle_length + self.min_gap)
             )
 
-        # # --- intersection -> incoming lanes mapping ---
+        # # --- intersection -> incoming lanes mapping , these ar ethe list of lane_ids that enter this intersection---
         self.inter_in_lanes = {}
         for inter in self.world.intersections:          # Intersection objects
             inter_in_lanes = []
@@ -85,59 +84,44 @@ class HilightAgent(BaseAgent):
         """
         Build observations that follow Table 4:
 
-            car_num       : sum of all vehicles on each lane
-            queue_length  : queue length in meters for each incoming lane
-            occupancy     : (# vehicles on lane) / (lane capacity)
-            flow          : # vehicles passing through intersection per unit time
-            stop_car_num  : # vehicles with speed < 0.1 m/s, normalized by capacity
-            waiting_time  : waiting time of the FIRST vehicle on each lane
-            average_speed : average speed of all vehicles on lane
+            car_num       : totaled sum of all vehicles on each lane (per intersection)
+            queue_length  : queue length in meters for each incoming lane (per lane)
+            occupancy     : (# vehicles on lane) / (lane capacity) (per lane)
+            flow          : # vehicles passing through intersection per unit time (per intersection)
+            stop_car_num  : # vehicles with speed < 0.1 m/s, normalized by capacity (per lane)
+            waiting_time  : waiting time of the FIRST vehicle on each lane (per lane)
+            average_speed : average speed of all vehicles on lane (per intersection)
             pressure      : difference in vehicle count between incoming and
-                            corresponding outgoing lanes
-            delay_time    : (actual travel time - ideal travel time) per lane
+                            corresponding outgoing lanes (per approach)
+            delay_time    : (actual travel time - ideal travel time) (per intersection)
         """
 
         world = self.world
         eng = self.eng
         metric = self.metric
 
-        # ---------- RAW LANE-LEVEL QUANTITIES FROM ENVIRONMENT ----------
-        # car_num: total number of vehicles on each lane
-        lane_vehicle_count = eng.get_lane_vehicle_count()  # {lane_id: int}
+        # car_num: sum of lane_vehicle_count per intersection
+        lane_vehicle_count = world.info_functions["lane_count"]()
 
-        # queue_length: length of queue in meters for each incoming lane
-        # (assumed to already be in meters and lane-indexed)
-        lane_queue_count = world.info_functions["lane_waiting_count"]()
-
-        # waiting time & delay etc. (APIs may differ slightly per env)
-        # lane_wait_time_first: waiting time of *first vehicle* per lane
-        # If your env already gives "first-vehicle" waiting time, you can use that
-        # directly. Otherwise we compute it from per-vehicle waiting time.
-        #
-        # Here we assume:
-        #   - eng.get_vehicle_waiting_time() -> {veh_id: float}
-        #   - lane_vehicles = eng.get_lane_vehicles() -> {lane_id: [veh_id]}
-        #
-        lane_vehicles = eng.get_lane_vehicles()  # {lane_id: [veh_id]}
-        vehicle_speed = eng.get_vehicle_speed()  # {veh_id: float (m/s)}
+        lane_vehicles = world.info_functions["lane_vehicles"]()
+        vehicle_speed = eng.get_vehicle_speed()  
         vehicle_wait_time = world.get_vehicle_waiting_time()
 
         # flow: number of vehicles passing through per unit time
-        # We assume world.get_cur_throughput() gives per-lane flow for current step.
-        # If it returns a scalar, replace this with your own per-lane computation.
-        lane_flow = world.get_cur_throughput()  # {lane_id: float} (veh / step)
-
+        lane_flow = world.info_function["throughput"]() 
+        
         # pressure: vehicle count difference between incoming and corresponding
-        # outgoing lanes. If your environment already provides this, we just use it.
-        lane_pressure = world.get_lane_pressure()  # {lane_id: float}
+        # outgoing lanes. 
+        lane_pressure = world.get_lane_pressure()  
 
         # delay_time: actual − ideal travel time per lane (assumed to be provided)
-        lane_delay = world.info_functions["lane_delay"]()  # {lane_id: float}
+        lane_delay = world.info_functions["lane_delay"]()  
 
-        # ---------- BUILD PER-INTERSECTION, PER-LANE FEATURES ----------
+        # ---------- BUILD PER-LANE FEATURES ----------
         sub_obs_list = []
 
         for inter_id in world.intersection_ids:
+
             lane_ids = self.inter_in_lanes[inter_id]
             lane_feat_list = []
 
@@ -148,9 +132,16 @@ class HilightAgent(BaseAgent):
                 # 1) car_num: total # of vehicles on this lane
                 car_num = int(lane_vehicle_count.get(lane_id, 0))
 
-                # 2) queue_length: queue length in meters
-                waiting_count = lane_queue_count.get(lane_id, 0)
-                q_len = waiting_count * self.vehicle_length
+                # 2) queue_length: queue length in meters, metrics.queue() doesn't work
+                v_list = lane_vehicles.get(lane_id, [])
+                queue_vids = [vid for vid in v_list if vehicle_speed.get(vid, 0.0) < 0.1]
+
+                if queue_vids:
+                    veh_info = eng.get_vehicle_info()            # dict: vid -> info
+                    distances = [veh_info[vid]["distance"] for vid in queue_vids]
+                    q_len = max(distances)                       # actual queue length in meters
+                else:
+                    q_len = 0.0
 
                 # 3) occupancy: (# vehicles) / (lane capacity)
                 occupancy = float(car_num) / float(cap)
@@ -191,15 +182,15 @@ class HilightAgent(BaseAgent):
                 delay_time = float(lane_delay.get(lane_id, 0.0))
 
                 lane_feat = [
-                    car_num,        # car_num
-                    q_len,          # queue_length
-                    occupancy,      # occupancy
-                    fl,             # flow
-                    stop_car_num,   # stop_car_num
-                    waiting_time,   # waiting_time
-                    avg_speed,      # average_speed
-                    pressure,       # pressure
-                    delay_time,     # delay_time
+                    car_num,        # car_num [0]
+                    q_len,          # queue_length [1]
+                    occupancy,      # occupancy [2]
+                    fl,             # flow [3]
+                    stop_car_num,   # stop_car_num [4]
+                    waiting_time,   # waiting_time [5]
+                    avg_speed,      # average_speed [6]
+                    pressure,       # pressure [7]
+                    delay_time,     # delay_time [8]
                 ]
                 lane_feat_list.append(lane_feat)
 
@@ -211,11 +202,11 @@ class HilightAgent(BaseAgent):
         max_lanes = max(feat.shape[0] for feat in sub_obs_list)
         feat_dim = 9
 
+        # At this point the feature dimension is 9 per-lane features, we compute the per-intersection (car num, delay time, average speed, flow)
+        # and per-approach features (pressure) when we generate features (build_gac_input())
         sub_obs = np.zeros((num_inters, max_lanes, feat_dim), dtype=np.float32)
         for i, inter_feat in enumerate(sub_obs_list):
             n = inter_feat.shape[0]
             sub_obs[i, :n, :] = inter_feat
 
-        # (Optional) regional meta-obs using stop_car_num & waiting_time can be
-        # added here, but we return only sub_obs for now.
         return {"sub_obs": sub_obs}
