@@ -309,7 +309,7 @@ class World(object):
 
         print("roads parsed.")
 
-        self.region = {}
+        self.regions = {}
         self.intersection_id2region_id = {i.id: None for i in self.intersections}
         self.region_id2intersection_list = {i.id: [] for i in self.intersections}
 
@@ -565,7 +565,7 @@ class World(object):
         self._update_arrive_time(list_vehicle_new_arrive)
         self._update_left_time(list_vehicle_new_left)
 
-    def get_cur_region_stop_car_num(self, region):
+    def get_cur_region_stop_car_num(self, region_id):
         '''
         get_cur_region_stop_car_num
         Get stop_car_num of selected region.
@@ -576,16 +576,18 @@ class World(object):
         lane_vehicles = self.eng.get_lane_vehicles()
         vehicle_speed = self.eng.get_vehicle_speed()
         total = 0
-        for intersection in self.region_id2intersection_id[region]:
-            for road in self.id2intersection[intersection].roads:
-                for lane in road.lanes:
-                    for vehicle in lane_vehicles[lane]:
-                        if vehicle_speed[vehicle] < 0.1:
-                            total += 1
+        for intersection in self.region_id2intersection_list[region_id]:
+            intersection_lanes = []
+            for road in intersection.roads:
+                intersection_lanes += road["lanes"]
+            for lane in intersection_lanes:
+                for vehicle in lane_vehicles[lane]:
+                    if vehicle_speed[vehicle] < 0.1:
+                        total += 1
 
         return total
 
-    def get_cur_region_waiting_time(self, region):
+    def get_cur_region_waiting_time(self, region_id):
         '''
         get_cur_region_waiting_time
         Get waiting_time of selected region.
@@ -595,10 +597,12 @@ class World(object):
         '''
         lane_waiting_time = self.eng.get_lane_waiting_time_count()
         total = 0
-        for intersection in self.region_id2intersection_id[region]:
-            for road in self.id2intersection[intersection].roads:
-                for lane in road.lanes:
-                    total += lane_waiting_time[lane]
+        for intersection in self.region_id2intersection_list[region_id]:
+            intersection_lanes = []
+            for road in intersection.roads:
+                intersection_lanes += road["lanes"]
+            for lane in intersection_lanes:
+                total += lane_waiting_time[lane]
 
         return total
 
