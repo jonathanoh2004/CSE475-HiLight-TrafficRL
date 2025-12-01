@@ -73,6 +73,13 @@ class HilightAgent(BaseAgent):
                     inter_in_lanes.append(lane_id)
             self.inter_in_lanes[inter.id] = inter_in_lanes
 
+        for iid, lanes in self.inter_in_lanes.items():
+            if len(lanes) != len(set(lanes)):
+                print("WARNING: duplicate lane IDs for intersection", iid)
+                print(lanes)
+
+        self._build_inter_approach_lanes() 
+
         # # --- regions & regional window for meta-policy ---
         # self.region_of_inter = self._build_region_mapping() # to be implemented
         # self.region_coords = self._compute_region_coords() # to be implemented
@@ -104,11 +111,15 @@ class HilightAgent(BaseAgent):
         lane_vehicle_count = world.info_functions["lane_count"]()
 
         lane_vehicles = world.info_functions["lane_vehicles"]()
+
+        vehicle_distance = eng.get_vehicle_distance()
+
         vehicle_speed = eng.get_vehicle_speed()  
+
         vehicle_wait_time = world.get_vehicle_waiting_time()
 
         # flow: number of vehicles passing through per unit time
-        lane_flow = world.info_function["throughput"]() 
+        lane_flow = world.info_functions["throughput"]() 
         
         # pressure: vehicle count difference between incoming and corresponding
         # outgoing lanes. 
@@ -137,8 +148,7 @@ class HilightAgent(BaseAgent):
                 queue_vids = [vid for vid in v_list if vehicle_speed.get(vid, 0.0) < 0.1]
 
                 if queue_vids:
-                    veh_info = eng.get_vehicle_info()            # dict: vid -> info
-                    distances = [veh_info[vid]["distance"] for vid in queue_vids]
+                    distances = [vehicle_distance.get(vid, 0.0) for vid in queue_vids]
                     q_len = max(distances)                       # actual queue length in meters
                 else:
                     q_len = 0.0
@@ -154,14 +164,11 @@ class HilightAgent(BaseAgent):
                 speeds = [float(vehicle_speed.get(vid, 0.0)) for vid in v_list]
 
                 # 5) stop_car_num:
-                #    # of vehicles with speed < 0.1 m/s, normalized by cap
+                # of vehicles with speed < 0.1 m/s, normalized by cap
                 stop_count = sum(1 for s in speeds if s < 0.1)
                 stop_car_num = float(stop_count) / float(cap)
 
                 # 6) waiting_time:
-                #    waiting time of the FIRST vehicle on each incoming lane.
-                #    If we know per-vehicle waiting time, use the first vehicle
-                #    in v_list; otherwise fall back to env's lane-level metric.
                 if v_list and vehicle_wait_time:
                     first_vid = v_list[0]
                     waiting_time = float(vehicle_wait_time.get(first_vid, 0.0))
@@ -174,8 +181,6 @@ class HilightAgent(BaseAgent):
                 avg_speed = float(np.mean(speeds)) if speeds else 0.0
 
                 # 8) pressure: difference between incoming and outgoing counts.
-                #    We assume world.get_lane_pressure already implements this
-                #    according to your simulator definition.
                 pressure = float(lane_pressure.get(lane_id, 0.0))
 
                 # 9) delay_time: actual travel time − ideal travel time
@@ -210,3 +215,143 @@ class HilightAgent(BaseAgent):
             sub_obs[i, :n, :] = inter_feat
 
         return {"sub_obs": sub_obs}
+
+    def _build_inter_approach_lanes(self):
+        """
+        Build mapping:
+          self.inter_approach_lanes[inter_idx]["N"|"E"|"S"|"W"] -> list of row indices in sub_obs
+        """
+        # 1) intersection coordinates from roadnet.json
+        inter_coord = {}
+        for inter in self.world.roadnet["intersections"]:
+            iid = inter["id"]
+            x = inter["point"]["x"]
+            y = inter["point"]["y"]
+            inter_coord[iid] = (x, y)
+
+        # 2) intersection id -> index in sub_obs (0..num_inters-1)
+        inter_id_to_idx = {iid: idx for idx, iid in enumerate(self.world.intersection_ids)}
+        self.inter_id_to_idx = inter_id_to_idx
+
+        # 3) lane_id -> (inter_idx, row_idx) 
+        lane_to_inter_row = {}
+        for iid, lane_ids in self.inter_in_lanes.items():
+            inter_idx = inter_id_to_idx[iid]
+            for row_idx, lane_id in enumerate(lane_ids):
+                lane_to_inter_row[lane_id] = (inter_idx, row_idx)
+        self.lane_to_inter_row = lane_to_inter_row
+
+        # 4) init result structure
+        num_inters = len(self.world.intersection_ids)
+        inter_approach_lanes = {
+            inter_idx: {"N": [], "E": [], "S": [], "W": []}
+            for inter_idx in range(num_inters)
+        }
+
+        # 5) loop over intersections and their incoming roads
+        for inter_obj in self.world.intersections:   # Intersection objects
+            inter_id = inter_obj.id
+            if inter_id not in inter_coord:
+                continue
+
+            inter_idx = inter_id_to_idx[inter_id]
+            x0, y0 = inter_coord[inter_id]
+
+            for road in inter_obj.in_roads:
+                start = road["startIntersection"]
+                end = road["endIntersection"]
+
+                # other intersection of this road
+                other = start if end == inter_id else end
+                if other not in inter_coord:
+                    continue
+
+                x1, y1 = inter_coord[other]
+                dx = x0 - x1
+                dy = y0 - y1
+
+                # determine direction of traffic as it enters inter_id
+                # (grid4x4 is axis-aligned so this works nicely)
+                if abs(dx) > abs(dy):
+                    # mostly horizontal
+                    if dx > 0:
+                        # other is west of inter_id, traffic flows east into this intersection
+                        dir_at_inter = "E"
+                    else:
+                        dir_at_inter = "W"
+                else:
+                    # mostly vertical
+                    if dy > 0:
+                        # other is south of inter_id, traffic flows north into this intersection
+                        dir_at_inter = "N"
+                    else:
+                        dir_at_inter = "S"
+
+                # pick lane indices for this incoming road in same order as inter_in_lanes
+                if self.world.RIGHT:
+                    from_zero = (road["startIntersection"] == inter_id)
+                else:
+                    from_zero = (road["endIntersection"] == inter_id)
+                lane_indices = range(len(road["lanes"])) if from_zero else range(len(road["lanes"]) - 1, -1, -1)
+
+                for n in lane_indices:
+                    lane_id = f'{road["id"]}_{n}'
+                    if lane_id in lane_to_inter_row:
+                        inter_idx2, row_idx = lane_to_inter_row[lane_id]
+                        # should be the same intersection
+                        if inter_idx2 == inter_idx:
+                            inter_approach_lanes[inter_idx][dir_at_inter].append(row_idx)
+
+        self.inter_approach_lanes = inter_approach_lanes
+        print("Approach lanes for inter 0:", self.inter_approach_lanes[0])
+
+    def build_gac_input(self, sub_obs):
+        # sub_obs: (num_inters, max_lanes, 9)
+        num_inters, max_lanes, feat_dim = sub_obs.shape
+
+        node_features = []
+
+        # iterates through all intersections
+        for inter_idx in range(num_inters):
+            lanes = sub_obs[inter_idx]  # (max_lanes, 9)
+
+            # --- 1) Per-lane part (48 dims) ---
+            lane_core = lanes[:, [1, 2, 4, 5]]      # queue, occupancy, stop, waiting
+            per_lane_flat = lane_core.flatten()     # (max_lanes*4 = 48,), this produces a 1D vector because GAT expects one feature vector per node
+
+            # --- 2) Per-approach pressure (4 dims) ---
+            approach_pressures = []
+            for dir in ["N", "E", "S", "W"]:
+                row_idxs = self.inter_approach_lanes[inter_idx][dir]  # list of lane row indices
+                if row_idxs:
+                    p = lanes[row_idxs, 7].sum()   # pressure is column 7
+                else:
+                    p = 0.0
+                approach_pressures.append(p)
+            approach_pressures = np.array(approach_pressures, dtype=np.float32)  # (4,)
+
+            # --- 3) Per-intersection scalars (4 dims) ---
+            # optionally ignore padded lanes with car_num == 0 for avg_speed
+            car_num_inter   = lanes[:, 0].sum()
+            flow_inter      = lanes[:, 3].sum()
+            valid_mask = lanes[:, 0] > 0
+            if valid_mask.any():
+                avg_speed_inter = lanes[valid_mask, 6].mean()
+            else:
+                avg_speed_inter = 0.0
+            delay_inter     = lanes[:, 8].sum()
+            inter_scalars = np.array(
+                [car_num_inter, flow_inter, avg_speed_inter, delay_inter],
+                dtype=np.float32
+            )  # (4,)
+
+            # --- 4) concatenate to 56 dims ---
+            node_feat_56 = np.concatenate(
+                [per_lane_flat, approach_pressures, inter_scalars],
+                axis=-1
+            )  # (56,)
+            node_features.append(node_feat_56)
+
+        gac_input = np.stack(node_features, axis=0)  # (num_inters, 56)
+        gac_input = gac_input[None, ...]            # (1, num_inters, 56)
+        return gac_input
