@@ -3,7 +3,16 @@ from .base import BaseAgent
 import numpy as np
 import torch
 import torch.nn as nn
-#from collections import OrderedDict
+import torch.nn.functional as F
+from collections import OrderedDict
+from collections import deque
+
+from meta_policy.MetaPolicyTransformer import MetaPolicyTransformer
+from meta_policy.MetaPolicyLSTM import MetaPolicyLSTM
+from agent.hilight_gac import GraphAttentionConcat
+
+from agent.hilight_gac import GraphAttentionConcat   # GAC module
+
 
 @Registry.register_model('hilight')
 class HilightAgent(BaseAgent):
@@ -80,13 +89,61 @@ class HilightAgent(BaseAgent):
                 print("WARNING: duplicate lane IDs for intersection", iid)
                 print(lanes)
 
-        self._build_inter_approach_lanes() #Added for GAC
-        self._build_knn_neighbors(k=4)  #added for GAC
-        # # --- regions & regional window for meta-policy ---
-        # self.region_of_inter = self._build_region_mapping() # to be implemented
-        # self.region_coords = self._compute_region_coords() # to be implemented
-        # from collections import deque
-        # self.regional_window = deque(maxlen=20)
+        self._build_inter_approach_lanes() 
+
+        # -------------------------------------------
+        #  HiLight: Meta-Policy + Sub-Policy modules
+        # -------------------------------------------
+
+        # ---- 1) Local encoder MLP (per-intersection 56-d node features) ----
+        # Input:  (B, N, 56)
+        # Output: (B, N, 56)
+        self.local_mlp = LocalEncoderMLP(in_dim=56, hidden_dim=128, out_dim=56)
+
+        # ---- 2) Graph Attention Concat (GAC) ----
+        # Input:  (B, N, 56)
+        # Output: (B, N, 280)   # (K+1)*F = (4+1)*56
+        self.gac = GraphAttentionConcat(in_dim=56, num_neighbors=4)
+
+        # ---- 3) Meta-Policy: Transformer + LSTM ----
+        # Region embedding dim (d_reg) = 4
+        # Number of regions (M) = 4 for grid4x4hl setup
+        self.d_reg = 4
+        self.M = 4
+
+        self.meta_transformer = MetaPolicyTransformer(
+            d_reg=self.d_reg,
+            n_regions=self.M,
+            n_layers=3,
+            n_heads=2,
+            ff_dim=165,   # matches your existing transformer config
+        )
+
+        self.meta_lstm = MetaPolicyLSTM(
+            M=self.M,
+            d_reg=self.d_reg,
+            hidden_size=256
+        )
+
+        # ---- 4) Sub-Policy Actor-Critic (shared over intersections) ----
+        # Use number of signal phases for num_actions
+        example_inter = self.world.intersections[0]
+        self.num_actions = len(example_inter.phases)
+
+        self.sub_policy = SubPolicyActorCritic(
+            z_dim=280,
+            d_reg=self.d_reg,
+            num_actions=self.num_actions,
+            hidden_dim=128,
+        )
+
+        # ---- 5) Neighbor index for GAC: (N, K) ----
+        # Build once, based on spatial coordinates of intersections
+        self._build_neighbor_index(K=4)
+
+        # ---- 6) Regional window (20-step history for Meta-Policy) ----
+        # Stores last 20 timesteps of regional features: (4,4) per step
+        self.regional_window = deque(maxlen=20)
 
     def get_ob(self):
 
@@ -307,37 +364,64 @@ class HilightAgent(BaseAgent):
 
         self.inter_approach_lanes = inter_approach_lanes
         print("Approach lanes for inter 0:", self.inter_approach_lanes[0])
+    
+    def _build_neighbor_index(self, K: int = 4):
+        """
+        Build neighbor index tensor for GAC.
 
-    #Added for GAC
-    def _build_knn_neighbors(self, k=4):
-        #Build K-nearest-neighbor index for intersections.
-        #Result is self.neighbor_index: LongTensor of shape (num_inters, k)
+        Uses intersection coordinates from world.roadnet to create a
+        K-nearest-neighbor graph over intersections.
 
-        num_inters = len(self.world.intersection_ids)
-        coords = np.zeros((num_inters, 2), dtype=np.float32)
+        Result:
+            self.neighbor_index : torch.LongTensor of shape (N, K)
+                neighbor_index[i, :] = indices of K nearest neighbors of node i
+        """
+        import math
 
-        # fill in center coords in the order of self.world.intersection_ids
-        for idx, iid in enumerate(self.world.intersection_ids):
-            x, y = self.inter_coord[iid]
-            coords[idx] = [x, y]
+        world = self.world
+        inter_ids = world.intersection_ids            # list of ids in fixed order
+        N = len(inter_ids)
 
-        neighbor_index = np.zeros((num_inters, k), dtype=np.int64)
-        for i in range(num_inters):
-            # compute distance from node i to all others
-            dx = coords[:, 0] - coords[i, 0]
-            dy = coords[:, 1] - coords[i, 1]
-            dist_sq = dx * dx + dy * dy
+        # id -> index
+        id2idx = {iid: idx for idx, iid in enumerate(inter_ids)}
 
-            # exclude self by setting a huge distance
-            dist_sq[i] = np.inf
+        # gather coordinates for each intersection id
+        coords = []
+        for iid in inter_ids:
+            x, y = world.intersection_id2coords[iid]
+            coords.append((x, y))
+        coords = np.array(coords, dtype=np.float32)   # (N, 2)
 
-            # indices of k nearest neighbors
-            knn = np.argsort(dist_sq)[:k]
-            neighbor_index[i] = knn
+        neighbor_index = []
 
-        # store as torch LongTensor
-        self.neighbor_index = torch.from_numpy(neighbor_index).long()
+        for i in range(N):
+            # compute distances from i to all j
+            dists = []
+            xi, yi = coords[i]
+            for j in range(N):
+                if i == j:
+                    continue
+                xj, yj = coords[j]
+                dx = xi - xj
+                dy = yi - yj
+                dist = math.sqrt(dx * dx + dy * dy)
+                dists.append((dist, j))
 
+            # sort by distance
+            dists.sort(key=lambda t: t[0])
+
+            # pick up to K nearest neighbors
+            nearest = [j for (_, j) in dists[:K]]
+
+            # if fewer than K (tiny graph), pad with self index
+            while len(nearest) < K:
+                nearest.append(i)
+
+            neighbor_index.append(nearest)
+
+        # shape: (N, K)
+        self.neighbor_index = torch.tensor(neighbor_index, dtype=torch.long)
+        print("Neighbor index built for GAC with shape:", self.neighbor_index.shape)
 
     def build_gac_input(self, sub_obs):
         # sub_obs: (num_inters, max_lanes, 9)
@@ -418,3 +502,123 @@ class LocalEncoderMLP(nn.Module):
         x = x.view(B, N, -1)   
 
         return x
+    
+class SubPolicyActorCritic(nn.Module):
+    """
+    HiLight Sub-Policy (Section 4.2):
+      - Shared-parameter Actor-Critic over all intersections.
+      - Input per node i:
+            z_i  : GAC output  (280-d)
+            F_g  : global feature from Meta-Policy  (4-d)
+            g_i  : local sub-goal for region/node i (4-d)
+        concat -> 288-d feature per intersection.
+
+    Shapes:
+        z      : (B, N, z_dim)       default z_dim = 280
+        F_g    : (B, d_reg) or (B, 1, d_reg) or (B, N, d_reg)
+        G      : (B, d_reg) or (B, 1, d_reg) or (B, N, d_reg)
+        logits : (B, N, num_actions)
+        values : (B, N)
+    """
+
+    def __init__(
+        self,
+        z_dim: int = 280,
+        d_reg: int = 4,
+        num_actions: int = 4,
+        hidden_dim: int = 128,
+    ):
+        super().__init__()
+
+        self.z_dim = z_dim
+        self.d_reg = d_reg
+        self.num_actions = num_actions
+
+        # total input: z_i (280) + F_g (4) + g_i (4) = 288
+        in_dim = z_dim + d_reg + d_reg
+
+        # ----- Actor head -----
+        self.actor = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_actions),
+        )
+
+        # ----- Critic head -----
+        self.critic = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def _tile_or_broadcast(self, x: torch.Tensor, N: int) -> torch.Tensor:
+        """
+        Utility: take x with shape:
+            (B, d)    or
+            (B, 1, d) or
+            (B, N, d)
+        and return a tensor of shape (B, N, d).
+        """
+        if x is None:
+            return None
+
+        if x.dim() == 2:
+            # (B, d) → (B, 1, d) → (B, N, d)
+            x = x.unsqueeze(1).expand(-1, N, -1)
+        elif x.dim() == 3:
+            B, T_or_N, d = x.shape
+            if T_or_N == 1:
+                # (B, 1, d) → (B, N, d)
+                x = x.expand(-1, N, -1)
+            elif T_or_N == N:
+                # already (B, N, d)
+                pass
+            else:
+                raise ValueError(
+                    f"Unexpected shape for guidance tensor: {x.shape}, "
+                    f"expected second dim 1 or N={N}"
+                )
+        else:
+            raise ValueError(f"Guidance tensor must be 2D or 3D, got {x.dim()}D")
+
+        return x
+
+    def forward(self, z: torch.Tensor, F_g: torch.Tensor, G: torch.Tensor):
+        """
+        z   : (B, N, z_dim)   from GAC
+        F_g : global feature at current timestep
+        G   : sub-goal feature per region / node
+
+        Returns:
+            logits : (B, N, num_actions)
+            values : (B, N)
+        """
+        B, N, z_dim = z.shape
+        assert z_dim == self.z_dim, f"Expected z_dim={self.z_dim}, got {z_dim}"
+
+        # Broadcast F_g and G over intersections if needed
+        Fg_tiled = self._tile_or_broadcast(F_g, N)  # (B, N, d_reg)
+        G_tiled  = self._tile_or_broadcast(G, N)    # (B, N, d_reg)
+
+        # Concatenate [z_i, F_g, g_i]
+        feat = torch.cat([z, Fg_tiled, G_tiled], dim=-1)  # (B, N, 288)
+
+        logits = self.actor(feat)          # (B, N, num_actions)
+        values = self.critic(feat).squeeze(-1)  # (B, N)
+
+        return logits, values
+
+    @torch.no_grad()
+    def act(self, z: torch.Tensor, F_g: torch.Tensor, G: torch.Tensor):
+        """
+        Convenience method to sample actions + return value + log_prob for A2C/PPO style updates.
+        """
+        logits, values = self.forward(z, F_g, G)   # (B, N, A), (B, N)
+        dist = torch.distributions.Categorical(logits=logits)
+
+        actions   = dist.sample()                 # (B, N)
+        log_probs = dist.log_prob(actions)        # (B, N)
+
+        return actions, log_probs, values

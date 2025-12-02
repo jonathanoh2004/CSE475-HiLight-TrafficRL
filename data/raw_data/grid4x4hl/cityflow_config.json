@@ -1,0 +1,9 @@
+{
+  "interval": 1.0,
+  "seed": 0,
+  "saveReplay": false,
+  "dir": "./", 
+  "roadnetFile": "data/raw_data/grid4x4hl/roadnet.json",
+  "flowFile": "data/raw_data/grid4x4hl/flow.json",
+  "rlTrafficLight": true
+}
