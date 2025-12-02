@@ -35,7 +35,9 @@ print(region_vec)
 print("Region features:", region_vec.shape)
 
 # Add batch dimension and time dimension
-region_seq = region_vec.unsqueeze(0).unsqueeze(1)  # (B=1, T=1, 4, 4)
+region_vec = torch.tensor(region_vec, dtype=torch.float32)
+region_seq = region_vec.unsqueeze(0).unsqueeze(1)   # (1, 1, 4, 4)
+
 
 # -------------------------
 # Transformer test
