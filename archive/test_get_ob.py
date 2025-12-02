@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from agent.hilight import LocalEncoderMLP
-from agent.hilight_gac import GraphAttentionConcat #Import GAC file to use the GraphAttentionConcat module
 
 def main():
     print("1. Load grid4x4 CityFlow config")
@@ -57,15 +56,7 @@ def main():
     print("local_embeddings shape:", gac_embeddings.shape)
     print("sample embedding for intersection 0:", gac_embeddings[0,0,:8])
 
-    #Added for GAC testing
-    # neighbor_index was built inside HilightAgent via _build_knn_neighbors
-    neighbor_index = hilight_agent.neighbor_index.to(device)   # (N, 4)
 
-    gac = GraphAttentionConcat(in_dim=56, num_neighbors=4).to(device)
-    z = gac(gac_embeddings, neighbor_index)                    # (1, N, 280)
-
-    print("GAC output shape:", z.shape)
-    print("sample GAC feature for inter 0, first 10 dims:", z[0, 0, :10])
     
 if __name__ == "__main__":
     main()

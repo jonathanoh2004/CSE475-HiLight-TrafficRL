@@ -1,4 +1,6 @@
-gym==0.21.0
+# gym==0.21.0   # overridden: using a newer gym version compatible with this environment
+gym==0.26.2
+gym-notices>=0.0.4
 lmdb==1.3.0
 mpmath==1.2.1
 numpy==1.21.5

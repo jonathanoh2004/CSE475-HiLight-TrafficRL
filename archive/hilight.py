@@ -3,7 +3,8 @@ from .base import BaseAgent
 import numpy as np
 import torch
 import torch.nn as nn
-#from collections import OrderedDict
+from collections import OrderedDict
+
 
 @Registry.register_model('hilight')
 class HilightAgent(BaseAgent):
@@ -80,8 +81,8 @@ class HilightAgent(BaseAgent):
                 print("WARNING: duplicate lane IDs for intersection", iid)
                 print(lanes)
 
-        self._build_inter_approach_lanes() #Added for GAC
-        self._build_knn_neighbors(k=4)  #added for GAC
+        self._build_inter_approach_lanes() 
+
         # # --- regions & regional window for meta-policy ---
         # self.region_of_inter = self._build_region_mapping() # to be implemented
         # self.region_coords = self._compute_region_coords() # to be implemented
@@ -230,7 +231,6 @@ class HilightAgent(BaseAgent):
             x = inter["point"]["x"]
             y = inter["point"]["y"]
             inter_coord[iid] = (x, y)
-        self.inter_coord = inter_coord #This line was added for the GAC
 
         # 2) intersection id -> index in sub_obs (0..num_inters-1)
         inter_id_to_idx = {iid: idx for idx, iid in enumerate(self.world.intersection_ids)}
@@ -307,37 +307,6 @@ class HilightAgent(BaseAgent):
 
         self.inter_approach_lanes = inter_approach_lanes
         print("Approach lanes for inter 0:", self.inter_approach_lanes[0])
-
-    #Added for GAC
-    def _build_knn_neighbors(self, k=4):
-        #Build K-nearest-neighbor index for intersections.
-        #Result is self.neighbor_index: LongTensor of shape (num_inters, k)
-
-        num_inters = len(self.world.intersection_ids)
-        coords = np.zeros((num_inters, 2), dtype=np.float32)
-
-        # fill in center coords in the order of self.world.intersection_ids
-        for idx, iid in enumerate(self.world.intersection_ids):
-            x, y = self.inter_coord[iid]
-            coords[idx] = [x, y]
-
-        neighbor_index = np.zeros((num_inters, k), dtype=np.int64)
-        for i in range(num_inters):
-            # compute distance from node i to all others
-            dx = coords[:, 0] - coords[i, 0]
-            dy = coords[:, 1] - coords[i, 1]
-            dist_sq = dx * dx + dy * dy
-
-            # exclude self by setting a huge distance
-            dist_sq[i] = np.inf
-
-            # indices of k nearest neighbors
-            knn = np.argsort(dist_sq)[:k]
-            neighbor_index[i] = knn
-
-        # store as torch LongTensor
-        self.neighbor_index = torch.from_numpy(neighbor_index).long()
-
 
     def build_gac_input(self, sub_obs):
         # sub_obs: (num_inters, max_lanes, 9)
