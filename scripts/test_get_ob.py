@@ -5,6 +5,9 @@ from common.metrics import Metrics
 from common.registry import Registry
 import agent
 import numpy as np
+import torch
+import torch.nn as nn
+from agent.hilight import LocalEncoderMLP
 
 def main():
     print("1. Load grid4x4 CityFlow config")
@@ -44,35 +47,17 @@ def main():
     iid0 = world.intersection_ids[0]
     print("inter 0 lane_ids:", hilight_agent.inter_in_lanes[iid0])
 
-    print("\n5. Step the world a few times and inspect again")
-    # use a dummy action: all zeros, length = num_intersections
-    actions = np.zeros(len(world.intersection_ids), dtype=int)
+    # testing local observation encoder
+    device = torch.device("cpu") 
+    gac_input_t = torch.from_numpy(gac_input).float().to(device)
+    local_encoder = LocalEncoderMLP(in_dim=56, hidden_dim=128, out_dim=56)
+    gac_embeddings = local_encoder(gac_input_t)
 
-    for t in range(300):
-        world.step(actions)           # advances CityFlow one step
-        obs = hilight_agent.get_ob()  # recompute observations
+    print("local_embeddings shape:", gac_embeddings.shape)
+    print("sample embedding for intersection 0:", gac_embeddings[0,0,:8])
 
-        if t in [0, 5, 10, 20, 29, 35,40, 45, 49, 100, 150, 200, 299]:
-            all_vehicles = world.eng.get_vehicles(include_waiting=True)
-            print(f"t={t+1}, num vehicles={len(all_vehicles)}")
 
-    sub_obs = obs["sub_obs"]
-    gac_input = hilight_agent.build_gac_input(sub_obs)
-
-    print("sub_obs shape after 300 steps:", sub_obs.shape)
-    print("gac_input shape after 300 steps:", gac_input.shape)
-    print("pressures for inter 0 after 300 steps:", gac_input[0, 0, 48:52])
-    print("first lane features at inter 0 after 300 steps:", sub_obs[0, 0, :])
-    print(sub_obs[0])
-
-    print("\nDebug: global state after stepping")
-    print("Current sim time:", world.eng.get_current_time())
-    all_vehicles = world.eng.get_vehicles(include_waiting=True)
-    print("Total vehicles in sim:", len(all_vehicles))
-
-    lane_vehicle_count = world.eng.get_lane_vehicle_count()
-    print("Total cars on all lanes:", sum(lane_vehicle_count.values()))
-
+    
 if __name__ == "__main__":
     main()
 

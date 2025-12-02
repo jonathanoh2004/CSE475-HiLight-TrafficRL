@@ -1,6 +1,9 @@
 from common.registry import Registry
 from .base import BaseAgent
 import numpy as np
+import torch
+import torch.nn as nn
+from collections import OrderedDict
 
 
 @Registry.register_model('hilight')
@@ -331,7 +334,6 @@ class HilightAgent(BaseAgent):
             approach_pressures = np.array(approach_pressures, dtype=np.float32)  # (4,)
 
             # --- 3) Per-intersection scalars (4 dims) ---
-            # optionally ignore padded lanes with car_num == 0 for avg_speed
             car_num_inter   = lanes[:, 0].sum()
             flow_inter      = lanes[:, 3].sum()
             valid_mask = lanes[:, 0] > 0
@@ -355,3 +357,33 @@ class HilightAgent(BaseAgent):
         gac_input = np.stack(node_features, axis=0)  # (num_inters, 56)
         gac_input = gac_input[None, ...]            # (1, num_inters, 56)
         return gac_input
+
+
+class LocalEncoderMLP(nn.Module):
+    def __init__(self, in_dim=56, hidden_dim=128, out_dim=56):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_dim)
+        )
+
+    def forward(self, x):
+        """
+        x: (B, N, F)
+           B = batch size
+           N = number of intersections (nodes)
+           F = feature dimension (56)
+        """
+        B, N, F = x.shape
+
+        # Treat each node as a separate sample for the MLP:
+        x = x.view(B * N, F)   
+
+        # Apply the shared MLP to every node
+        x = self.mlp(x)        
+
+        # Reshape back to (B, N, out_dim)
+        x = x.view(B, N, -1)   
+
+        return x
