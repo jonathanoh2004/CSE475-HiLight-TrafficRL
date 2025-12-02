@@ -296,7 +296,7 @@ class World(object):
         self.coords2intersection_id = {}
         for intersection in self.roadnet["intersections"]:
             intersection_id = intersection["id"]
-            coords_ = (intersection["x"], intersection["y"])
+            coords_ = (intersection["point"]["x"], intersection["point"]["y"])
             coords_list.append([coords_[0], coords_[1]])
             self.intersection_id2coords[intersection_id] = coords_
             self.coords2intersection_id[coords_] = intersection_id
