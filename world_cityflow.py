@@ -261,6 +261,7 @@ class World(object):
         self.id2idx = {i: idx for idx,i in enumerate(self.id2intersection)}
         print("intersections created.")
 
+
         # id of all roads and lanes
         print("parsing roads...")
         self.all_roads = []
@@ -296,7 +297,7 @@ class World(object):
         self.coords2intersection_id = {}
         for intersection in self.roadnet["intersections"]:
             intersection_id = intersection["id"]
-            coords_ = (intersection["x"], intersection["y"])
+            coords_ = (intersection["point"]["x"], intersection["point"]["y"])
             coords_list.append([coords_[0], coords_[1]])
             self.intersection_id2coords[intersection_id] = coords_
             self.coords2intersection_id[coords_] = intersection_id
@@ -312,15 +313,21 @@ class World(object):
 
         self.region_id2intersection_list = {}
         self.intersection_id2region_id = {}
-        self.region_id2coords = {}
+
         for i in range(N):
             region_id = region_labels[i]
             coords_ = (coords[i][0], coords[i][1])
             intersection_id = self.coords2intersection_id[coords_]
-            curr_region_coords = region_coords[i]
+
+            if region_id not in self.region_id2intersection_list:
+                self.region_id2intersection_list[region_id] = []
             self.region_id2intersection_list[region_id].append(intersection_id)
+
+            if intersection_id not in self.intersection_id2region_id:
+                self.intersection_id2region_id[intersection_id] = []
             self.intersection_id2region_id[intersection_id] = region_id
-            self.region_id2coords[region_id] = (curr_region_coords[0], curr_region_coords[1])
+
+        self.region_id2coords = {r: region_coords[r] for r in range(region_coords.shape[0])}
 
         print("regions parsed.")
 
