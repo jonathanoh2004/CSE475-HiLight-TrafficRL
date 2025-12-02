@@ -3,6 +3,7 @@ from .base import BaseAgent
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from collections import OrderedDict
 
 
@@ -387,3 +388,123 @@ class LocalEncoderMLP(nn.Module):
         x = x.view(B, N, -1)   
 
         return x
+    
+class SubPolicyActorCritic(nn.Module):
+    """
+    HiLight Sub-Policy (Section 4.2):
+      - Shared-parameter Actor-Critic over all intersections.
+      - Input per node i:
+            z_i  : GAC output  (280-d)
+            F_g  : global feature from Meta-Policy  (4-d)
+            g_i  : local sub-goal for region/node i (4-d)
+        concat -> 288-d feature per intersection.
+
+    Shapes:
+        z      : (B, N, z_dim)       default z_dim = 280
+        F_g    : (B, d_reg) or (B, 1, d_reg) or (B, N, d_reg)
+        G      : (B, d_reg) or (B, 1, d_reg) or (B, N, d_reg)
+        logits : (B, N, num_actions)
+        values : (B, N)
+    """
+
+    def __init__(
+        self,
+        z_dim: int = 280,
+        d_reg: int = 4,
+        num_actions: int = 4,
+        hidden_dim: int = 128,
+    ):
+        super().__init__()
+
+        self.z_dim = z_dim
+        self.d_reg = d_reg
+        self.num_actions = num_actions
+
+        # total input: z_i (280) + F_g (4) + g_i (4) = 288
+        in_dim = z_dim + d_reg + d_reg
+
+        # ----- Actor head -----
+        self.actor = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_actions),
+        )
+
+        # ----- Critic head -----
+        self.critic = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def _tile_or_broadcast(self, x: torch.Tensor, N: int) -> torch.Tensor:
+        """
+        Utility: take x with shape:
+            (B, d)    or
+            (B, 1, d) or
+            (B, N, d)
+        and return a tensor of shape (B, N, d).
+        """
+        if x is None:
+            return None
+
+        if x.dim() == 2:
+            # (B, d) → (B, 1, d) → (B, N, d)
+            x = x.unsqueeze(1).expand(-1, N, -1)
+        elif x.dim() == 3:
+            B, T_or_N, d = x.shape
+            if T_or_N == 1:
+                # (B, 1, d) → (B, N, d)
+                x = x.expand(-1, N, -1)
+            elif T_or_N == N:
+                # already (B, N, d)
+                pass
+            else:
+                raise ValueError(
+                    f"Unexpected shape for guidance tensor: {x.shape}, "
+                    f"expected second dim 1 or N={N}"
+                )
+        else:
+            raise ValueError(f"Guidance tensor must be 2D or 3D, got {x.dim()}D")
+
+        return x
+
+    def forward(self, z: torch.Tensor, F_g: torch.Tensor, G: torch.Tensor):
+        """
+        z   : (B, N, z_dim)   from GAC
+        F_g : global feature at current timestep
+        G   : sub-goal feature per region / node
+
+        Returns:
+            logits : (B, N, num_actions)
+            values : (B, N)
+        """
+        B, N, z_dim = z.shape
+        assert z_dim == self.z_dim, f"Expected z_dim={self.z_dim}, got {z_dim}"
+
+        # Broadcast F_g and G over intersections if needed
+        Fg_tiled = self._tile_or_broadcast(F_g, N)  # (B, N, d_reg)
+        G_tiled  = self._tile_or_broadcast(G, N)    # (B, N, d_reg)
+
+        # Concatenate [z_i, F_g, g_i]
+        feat = torch.cat([z, Fg_tiled, G_tiled], dim=-1)  # (B, N, 288)
+
+        logits = self.actor(feat)          # (B, N, num_actions)
+        values = self.critic(feat).squeeze(-1)  # (B, N)
+
+        return logits, values
+
+    @torch.no_grad()
+    def act(self, z: torch.Tensor, F_g: torch.Tensor, G: torch.Tensor):
+        """
+        Convenience method to sample actions + return value + log_prob for A2C/PPO style updates.
+        """
+        logits, values = self.forward(z, F_g, G)   # (B, N, A), (B, N)
+        dist = torch.distributions.Categorical(logits=logits)
+
+        actions   = dist.sample()                 # (B, N)
+        log_probs = dist.log_prob(actions)        # (B, N)
+
+        return actions, log_probs, values
