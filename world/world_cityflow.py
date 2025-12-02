@@ -6,6 +6,7 @@ from common.registry import Registry
 import numpy as np
 from math import atan2, pi
 import math
+from sklearn.cluster import KMeans
 
 class Intersection(object):
     '''
@@ -289,6 +290,39 @@ class World(object):
             i.sort_roads()
 
         print("roads parsed.")
+
+        coords_list = []
+        self.intersection_id2coords = {}
+        self.coords2intersection_id = {}
+        for intersection in self.roadnet["intersections"]:
+            intersection_id = intersection["id"]
+            coords_ = (intersection["x"], intersection["y"])
+            coords_list.append([coords_[0], coords_[1]])
+            self.intersection_id2coords[intersection_id] = coords_
+            self.coords2intersection_id[coords_] = intersection_id
+
+        coords = np.array(coords_list)
+
+        N = coords.shape[0]  # number of nodes
+        K = 8  # number of regions
+
+        kmeans = KMeans(n_clusters=K, random_state=42)
+        region_labels = kmeans.fit_predict(coords)  # [N] region id for each node (0..K-1)
+        region_coords = kmeans.cluster_centers_
+
+        self.region_id2intersection_list = {}
+        self.intersection_id2region_id = {}
+        self.region_id2coords = {}
+        for i in range(N):
+            region_id = region_labels[i]
+            coords_ = (coords[i][0], coords[i][1])
+            intersection_id = self.coords2intersection_id[coords_]
+            curr_region_coords = region_coords[i]
+            self.region_id2intersection_list[region_id].append(intersection_id)
+            self.intersection_id2region_id[intersection_id] = region_id
+            self.region_id2coords[region_id] = (curr_region_coords[0], curr_region_coords[1])
+
+        print("regions parsed.")
 
         # initializing info functions
         self.info_functions = {
