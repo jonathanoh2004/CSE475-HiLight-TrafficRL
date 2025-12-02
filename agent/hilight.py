@@ -5,6 +5,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
+from collections import deque
+
+from meta_policy.MetaPolicyTransformer import MetaPolicyTransformer
+from meta_policy.MetaPolicyLSTM import MetaPolicyLSTM
+from agent.hilight_gac import GraphAttentionConcat
+
+from agent.hilight_gac import GraphAttentionConcat   # GAC module
 
 
 @Registry.register_model('hilight')
@@ -84,11 +91,59 @@ class HilightAgent(BaseAgent):
 
         self._build_inter_approach_lanes() 
 
-        # # --- regions & regional window for meta-policy ---
-        # self.region_of_inter = self._build_region_mapping() # to be implemented
-        # self.region_coords = self._compute_region_coords() # to be implemented
-        # from collections import deque
-        # self.regional_window = deque(maxlen=20)
+        # -------------------------------------------
+        #  HiLight: Meta-Policy + Sub-Policy modules
+        # -------------------------------------------
+
+        # ---- 1) Local encoder MLP (per-intersection 56-d node features) ----
+        # Input:  (B, N, 56)
+        # Output: (B, N, 56)
+        self.local_mlp = LocalEncoderMLP(in_dim=56, hidden_dim=128, out_dim=56)
+
+        # ---- 2) Graph Attention Concat (GAC) ----
+        # Input:  (B, N, 56)
+        # Output: (B, N, 280)   # (K+1)*F = (4+1)*56
+        self.gac = GraphAttentionConcat(in_dim=56, num_neighbors=4)
+
+        # ---- 3) Meta-Policy: Transformer + LSTM ----
+        # Region embedding dim (d_reg) = 4
+        # Number of regions (M) = 4 for grid4x4hl setup
+        self.d_reg = 4
+        self.M = 4
+
+        self.meta_transformer = MetaPolicyTransformer(
+            d_reg=self.d_reg,
+            n_regions=self.M,
+            n_layers=3,
+            n_heads=2,
+            ff_dim=165,   # matches your existing transformer config
+        )
+
+        self.meta_lstm = MetaPolicyLSTM(
+            M=self.M,
+            d_reg=self.d_reg,
+            hidden_size=256
+        )
+
+        # ---- 4) Sub-Policy Actor-Critic (shared over intersections) ----
+        # Use number of signal phases for num_actions
+        example_inter = self.world.intersections[0]
+        self.num_actions = len(example_inter.phases)
+
+        self.sub_policy = SubPolicyActorCritic(
+            z_dim=280,
+            d_reg=self.d_reg,
+            num_actions=self.num_actions,
+            hidden_dim=128,
+        )
+
+        # ---- 5) Neighbor index for GAC: (N, K) ----
+        # Build once, based on spatial coordinates of intersections
+        self._build_neighbor_index(K=4)
+
+        # ---- 6) Regional window (20-step history for Meta-Policy) ----
+        # Stores last 20 timesteps of regional features: (4,4) per step
+        self.regional_window = deque(maxlen=20)
 
     def get_ob(self):
 
@@ -308,6 +363,64 @@ class HilightAgent(BaseAgent):
 
         self.inter_approach_lanes = inter_approach_lanes
         print("Approach lanes for inter 0:", self.inter_approach_lanes[0])
+    
+    def _build_neighbor_index(self, K: int = 4):
+        """
+        Build neighbor index tensor for GAC.
+
+        Uses intersection coordinates from world.roadnet to create a
+        K-nearest-neighbor graph over intersections.
+
+        Result:
+            self.neighbor_index : torch.LongTensor of shape (N, K)
+                neighbor_index[i, :] = indices of K nearest neighbors of node i
+        """
+        import math
+
+        world = self.world
+        inter_ids = world.intersection_ids            # list of ids in fixed order
+        N = len(inter_ids)
+
+        # id -> index
+        id2idx = {iid: idx for idx, iid in enumerate(inter_ids)}
+
+        # gather coordinates for each intersection id
+        coords = []
+        for iid in inter_ids:
+            x, y = world.intersection_id2coords[iid]
+            coords.append((x, y))
+        coords = np.array(coords, dtype=np.float32)   # (N, 2)
+
+        neighbor_index = []
+
+        for i in range(N):
+            # compute distances from i to all j
+            dists = []
+            xi, yi = coords[i]
+            for j in range(N):
+                if i == j:
+                    continue
+                xj, yj = coords[j]
+                dx = xi - xj
+                dy = yi - yj
+                dist = math.sqrt(dx * dx + dy * dy)
+                dists.append((dist, j))
+
+            # sort by distance
+            dists.sort(key=lambda t: t[0])
+
+            # pick up to K nearest neighbors
+            nearest = [j for (_, j) in dists[:K]]
+
+            # if fewer than K (tiny graph), pad with self index
+            while len(nearest) < K:
+                nearest.append(i)
+
+            neighbor_index.append(nearest)
+
+        # shape: (N, K)
+        self.neighbor_index = torch.tensor(neighbor_index, dtype=torch.long)
+        print("Neighbor index built for GAC with shape:", self.neighbor_index.shape)
 
     def build_gac_input(self, sub_obs):
         # sub_obs: (num_inters, max_lanes, 9)
