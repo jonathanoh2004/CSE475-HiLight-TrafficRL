@@ -1,22 +1,11 @@
 import torch
 import torch.nn as nn
 
-
 class MetaPolicyLSTM(nn.Module):
     """
-    HiLight Section 4.1.2 — LSTM-based Sub-goal Generation
-
-    INPUT:
-        subregion_seq : (B, T, M*d_reg)
-            B = batch size
-            T = time steps (20)
-            M = number of regions (4)
-            d_reg = regional embedding dim (4)
-            So normally: (B, 20, 16)
-
-    OUTPUT:
-        G : (B, 1, d_reg)   # (B, 1, 4)
-            Global sub-goal vector
+    Modified for your setup:
+    Output shape = (B, 4, 4)
+    One 4-dim subgoal per region.
     """
 
     def __init__(self, M=4, d_reg=4, hidden_size=256):
@@ -26,61 +15,44 @@ class MetaPolicyLSTM(nn.Module):
         self.d_reg = d_reg
         self.hidden_size = hidden_size
 
-        # LSTM input size = flattened regional features
-        self.input_dim = M * d_reg   # 16
+        # LSTM input: flattened regional embeddings (16)
+        self.input_dim = M * d_reg
 
-        # 4-layer LSTM
         self.lstm = nn.LSTM(
             input_size=self.input_dim,
             hidden_size=hidden_size,
-            num_layers=4,          # paper says 4-layer LSTM
+            num_layers=4,
             batch_first=True
         )
 
-        # FC layer to project hidden states to 4-dim subgoal
-        self.fc = nn.Linear(hidden_size, d_reg)
+        # FC layer to produce per-region subgoal vectors
+        self.fc = nn.Linear(hidden_size, M * d_reg)
 
     def forward(self, subregion_seq):
         """
-        subregion_seq: (B, T, M*d_reg)
+        subregion_seq: (B, T, 16)
+        Output: (B, 4, 4)
         """
 
         B, T, F = subregion_seq.shape
-        assert F == self.M * self.d_reg, "Incorrect input dimension"
+        assert F == self.M * self.d_reg
 
-        # ------------------------------------------------------------
-        # 1. Feed into LSTM  → output: (B, T, hidden_size)
-        # ------------------------------------------------------------
-        lstm_out, (h_n, c_n) = self.lstm(subregion_seq)
+        lstm_out, (h_n, _) = self.lstm(subregion_seq)
 
-        # ------------------------------------------------------------
-        # 2. Extract last-step hidden state for each LSTM layer
-        #    h_n shape = (num_layers, B, hidden_size)
-        #    We want last layer → h_n[-1] = (B, hidden_size)
-        # ------------------------------------------------------------
-        final_hidden = h_n[-1]   # (B, hidden_size)
+        # Last layer hidden state → (B, 256)
+        h_last = h_n[-1]
 
-        # ------------------------------------------------------------
-        # 3. FC projection to 4-dim global subgoal
-        # ------------------------------------------------------------
-        G = self.fc(final_hidden)   # (B, 4)
+        # FC → (B, 16)
+        out = self.fc(h_last)
 
-        # ------------------------------------------------------------
-        # 4. Reshape to (B, 1, 4) to match table output (1, 1, 4)
-        # ------------------------------------------------------------
-        return G.unsqueeze(1)       # (B, 1, 4)
+        # Reshape → (B, 4, 4)
+        return out.view(B, self.M, self.d_reg)
+
+
 if __name__ == "__main__":
-    print("\n=== Running MetaPolicyLSTM Test ===\n")
+    lstm = MetaPolicyLSTM()
 
-    lstm_model = MetaPolicyLSTM(M=4, d_reg=4, hidden_size=256)
+    fake = torch.randn(1, 20, 16)
+    G = lstm(fake)
 
-    # Fake input from the Transformer
-    # (batch=1, time=20, 4 regions * 4 dims = 16)
-    subregion_seq = torch.randn(1, 20, 16)
-
-    G = lstm_model(subregion_seq)
-
-    print("Input shape:", subregion_seq.shape)
-    print("Output G shape:", G.shape)     # (1, 1, 4)
-
-    assert G.shape == (1, 1, 4)
+    print("Output shape:", G.shape)   # (1, 4, 4)
