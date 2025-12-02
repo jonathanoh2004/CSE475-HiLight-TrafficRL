@@ -31,6 +31,7 @@ lstm = MetaPolicyLSTM(
 # Fake test input from world
 # -------------------------
 region_vec = world.get_region_features()   # (4, 4)
+print(region_vec)
 print("Region features:", region_vec.shape)
 
 # Add batch dimension and time dimension

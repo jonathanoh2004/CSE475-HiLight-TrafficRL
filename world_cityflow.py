@@ -295,9 +295,18 @@ class World(object):
         coords_list = []
         self.intersection_id2coords = {}
         self.coords2intersection_id = {}
-        for intersection in self.roadnet["intersections"]:
-            intersection_id = intersection["id"]
-            coords_ = (intersection["point"]["x"], intersection["point"]["y"])
+        stupid_intersection2coords = {}
+        for stupid_intersection in self.roadnet["intersections"]:
+            curr_coords = (stupid_intersection["point"]["x"], stupid_intersection["point"]["y"])
+            stupid_intersection2coords[stupid_intersection["id"]] = curr_coords
+
+        for intersection in self.intersections:
+            intersection_id = intersection.id
+            if intersection_id in stupid_intersection2coords:
+                coords_ = stupid_intersection2coords[intersection_id]
+            else:
+                raise ValueError("I don't even know")
+
             coords_list.append([coords_[0], coords_[1]])
             self.intersection_id2coords[intersection_id] = coords_
             self.coords2intersection_id[coords_] = intersection_id
@@ -331,9 +340,13 @@ class World(object):
             self.intersection_id2region_id[intersection_id] = region_id
 
         self.region_id2coords = {r: region_coords[r] for r in range(region_coords.shape[0])}
+        temp_set = set(self.region_ids)
+        self.region_ids = []
+        for key in temp_set:
+            self.region_ids.append(key)
 
         print("regions parsed.")
-
+        print("number of regions: ", str(len(self.region_ids)))
         # initializing info functions
         self.info_functions = {
             "vehicles": (lambda: self.eng.get_vehicles(include_waiting=True)),
@@ -466,8 +479,11 @@ class World(object):
             coords = self.region_id2coords[id]
             feature_list = [stop_car_num, waiting_time, coords[0], coords[1]]
             vecs.append(np.hstack(feature_list))
+            print(vecs[len(vecs)-1].shape)
 
-        return np.vstack(vecs)
+        features = np.vstack(vecs)
+        print("regional features shape: ", features.shape)
+        return features
 
     def get_cur_region_stop_car_num(self, region_id):
         '''
@@ -480,8 +496,8 @@ class World(object):
         lane_vehicles = self.eng.get_lane_vehicles()
         vehicle_speed = self.eng.get_vehicle_speed()
         total = 0
+
         for intersection_id in self.region_id2intersection_list[region_id]:
-            intersection_lanes = []
             intersection = self.id2intersection[intersection_id]
 
             in_lanes = []
@@ -498,7 +514,7 @@ class World(object):
                     out_lanes.append(road["id"] + "_" + str(n))
 
             for lane in (out_lanes + in_lanes):
-                print(lane)
+
                 for vehicle in lane_vehicles[lane]:
                     if vehicle_speed[vehicle] < 0.1:
                         total += 1
@@ -514,10 +530,9 @@ class World(object):
         :return: waiting_time of selected region
         '''
 
-        lane_waiting_time = self.eng.get_lane_waiting_time_count()
+        lane_waiting_time = self.eng.get_lane_waiting_vehicle_count()
         total = 0
         for intersection_id in self.region_id2intersection_list[region_id]:
-            intersection_lanes = []
             intersection = self.id2intersection[intersection_id]
 
             in_lanes = []
@@ -534,7 +549,7 @@ class World(object):
                     out_lanes.append(road["id"] + "_" + str(n))
 
             for lane in (out_lanes + in_lanes):
-                total += lane_waiting_time[lane["id"]]
+                total += lane_waiting_time[lane]
 
         return total
 
@@ -701,6 +716,7 @@ class World(object):
         lane_vehicles = self.eng.get_lane_vehicles()
         vehicle_waiting_time = self.get_vehicle_waiting_time()
         for lane in self.all_lanes:
+            print(f"weird shit and stuff {lane}")
             lane_waiting_time[lane] = 0
             for vehicle in lane_vehicles[lane]:
                 lane_waiting_time[lane] += vehicle_waiting_time[vehicle]
