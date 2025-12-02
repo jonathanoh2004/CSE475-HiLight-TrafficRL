@@ -441,7 +441,47 @@ class World(object):
             set(self.list_lane_vehicle_previous_step) - set(self.list_lane_vehicle_current_step))
         self._update_arrive_time(list_vehicle_new_arrive)
         self._update_left_time(list_vehicle_new_left)
-    
+
+    def get_cur_region_stop_car_num(self, region_id):
+        '''
+        get_cur_region_stop_car_num
+        Get stop_car_num of selected region.
+
+        :param region: region of the network
+        :return: stop_car_num for the selected region
+        '''
+        lane_vehicles = self.eng.get_lane_vehicles()
+        vehicle_speed = self.eng.get_vehicle_speed()
+        total = 0
+        for intersection in self.region_id2intersection_list[region_id]:
+            intersection_lanes = []
+            for road in intersection.roads:
+                intersection_lanes += road["lanes"]
+            for lane in intersection_lanes:
+                for vehicle in lane_vehicles[lane]:
+                    if vehicle_speed[vehicle] < 0.1:
+                        total += 1
+
+        return total
+
+    def get_cur_region_waiting_time(self, region_id):
+        '''
+        get_cur_region_waiting_time
+        Get waiting_time of selected region.
+
+        :param region: region of the network
+        :return: waiting_time of selected region
+        '''
+        lane_waiting_time = self.eng.get_lane_waiting_time_count()
+        total = 0
+        for intersection in self.region_id2intersection_list[region_id]:
+            intersection_lanes = []
+            for road in intersection.roads:
+                intersection_lanes += road["lanes"]
+            for lane in intersection_lanes:
+                total += lane_waiting_time[lane]
+
+        return total
 
     def get_cur_throughput(self):
         '''
