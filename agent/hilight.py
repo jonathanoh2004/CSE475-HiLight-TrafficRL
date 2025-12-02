@@ -422,6 +422,131 @@ class HilightAgent(BaseAgent):
         self.neighbor_index = torch.tensor(neighbor_index, dtype=torch.long)
         print("Neighbor index built for GAC with shape:", self.neighbor_index.shape)
 
+    def update_regional_window(self):
+        """
+        Pull region-level features from the world and push them into the 20-step window.
+        Each feature matrix is shape (4, 4).
+        The window becomes a (T, 4, 4) list-like buffer.
+        """
+        region_feat = self.world.get_region_features()    # numpy (4,4)
+        region_feat = torch.tensor(region_feat, dtype=torch.float32)
+
+        self.regional_window.append(region_feat)          # maintain length 20
+
+    def compute_meta_policy(self):
+        """
+        Uses the last 20 timesteps of regional features and computes:
+            - F_g_t : global embedding at current timestep (B, 4)
+            - G_t   : per-region subgoals (B, 4, 4)
+        """
+        # Need 20 timesteps before meta-policy is active
+        if len(self.regional_window) < 20:
+            # return neutral embeddings until enough history collected
+            B = 1
+            F_g_t = torch.zeros(B, self.d_reg)
+            G_t   = torch.zeros(B, self.M, self.d_reg)
+            return F_g_t, G_t
+
+        # 1) Stack window into (B=1, T=20, M=4, d_reg=4)
+        region_seq = torch.stack(list(self.regional_window), dim=0)  # (20,4,4)
+        region_seq = region_seq.unsqueeze(0)                          # (1,20,4,4)
+
+        # 2) Transformer → F_g_seq (1,20,4), subregion_seq (1,20,16)
+        F_g_seq, subregion_seq = self.meta_transformer(region_seq)
+
+        # 3) LSTM → G_seq (1,4,4)
+        G_seq = self.meta_lstm(subregion_seq)
+
+        # 4) Use the latest timestep’s global embedding
+        F_g_t = F_g_seq[:, -1, :]      # (1,4)
+
+        return F_g_t, G_seq            # G_seq = (1,4,4)
+    
+    def compute_local_features(self):
+        """
+        Local (per-intersection) feature pipeline:
+            get_ob() -> build_gac_input -> LocalEncoderMLP -> GAC
+        Returns:
+            z : (B, N, 280)
+        """
+        # 1) raw lane-level obs → dict {"sub_obs": (num_inters, max_lanes, 9)}
+        ob = self.get_ob()
+        sub_obs = ob["sub_obs"]
+
+        # 2) build 56-d features per intersection → (1, N, 56)
+        gac_in = self.build_gac_input(sub_obs)
+        x_local = torch.tensor(gac_in, dtype=torch.float32)
+
+        # 3) Local MLP encoder → (1, N, 56)
+        h_local = self.local_mlp(x_local)
+
+        # 4) GAC → (1, N, 280)
+        z = self.gac(h_local, self.neighbor_index)
+        return z
+    
+    def compute_subpolicy_action(self):
+        """
+        Runs the complete HiLight pipeline:
+            local features  -> z
+            meta-policy     -> F_g_t, G_t
+            sub-policy A+C  -> logits, values, actions
+
+        Returns:
+            actions : (N,) torch.LongTensor of phase indices
+            logits  : (1, N, A)
+            values  : (1, N)
+        """
+        # -------------------------
+        # 1. Update regional window
+        # -------------------------
+        self.update_regional_window()
+
+        # -------------------------
+        # 2. Meta-policy (global & regional guidance)
+        # -------------------------
+        F_g_t, G_t = self.compute_meta_policy()
+        # shapes:
+        #   F_g_t : (1, 4)
+        #   G_t   : (1, 4, 4)
+
+        # -------------------------
+        # 3. Local features → z
+        # -------------------------
+        z = self.compute_local_features()
+        # z shape: (1, N, 280)
+
+        # -------------------------
+        # 4. Sub-policy Actor–Critic
+        # -------------------------
+        logits, values = self.sub_policy(z, F_g_t, G_t)
+        # logits: (1, N, num_actions)
+        # values: (1, N)
+
+        dist = torch.distributions.Categorical(logits=logits)
+        actions = dist.sample()             # (1, N)
+        actions = actions.squeeze(0)        # → (N,) per intersection
+
+        return actions, logits, values
+    
+    def act(self):
+        """
+        Returns a dict:
+            { intersection_id : chosen_phase }
+        matching CityFlow's API requirement.
+        """
+        actions, logits, values = self.compute_subpolicy_action()
+
+        # Convert tensor actions → Python ints
+        actions = actions.cpu().numpy().tolist()   # length N
+
+        # Map back to intersection IDs
+        inter_ids = self.world.intersection_ids
+        action_dict = {iid: actions[i] for i, iid in enumerate(inter_ids)}
+
+        return action_dict
+
+
+
     def build_gac_input(self, sub_obs):
         # sub_obs: (num_inters, max_lanes, 9)
         num_inters, max_lanes, feat_dim = sub_obs.shape
