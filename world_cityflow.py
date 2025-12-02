@@ -305,7 +305,7 @@ class World(object):
         coords = np.array(coords_list)
 
         N = coords.shape[0]  # number of nodes
-        K = 8  # number of regions
+        K = 4  # number of regions
 
         kmeans = KMeans(n_clusters=K, random_state=42)
         region_labels = kmeans.fit_predict(coords)  # [N] region id for each node (0..K-1)
@@ -313,11 +313,14 @@ class World(object):
 
         self.region_id2intersection_list = {}
         self.intersection_id2region_id = {}
+        self.region_ids = []
 
         for i in range(N):
             region_id = region_labels[i]
             coords_ = (coords[i][0], coords[i][1])
             intersection_id = self.coords2intersection_id[coords_]
+
+            self.region_ids.append(region_id)
 
             if region_id not in self.region_id2intersection_list:
                 self.region_id2intersection_list[region_id] = []
@@ -449,6 +452,23 @@ class World(object):
         self._update_arrive_time(list_vehicle_new_arrive)
         self._update_left_time(list_vehicle_new_left)
 
+    def get_region_features(self):
+        '''
+        get_region_features
+        Gets the (1, 4) matrix for each region, concatenated using np.vstack()
+
+        :return: (N, 4) matrix of regional features
+        '''
+        vecs = []
+        for id in self.region_ids:
+            stop_car_num = self.get_cur_region_stop_car_num(id)
+            waiting_time = self.get_cur_region_waiting_time(id)
+            coords = self.region_id2coords[id]
+            feature_list = [stop_car_num, waiting_time, coords[0], coords[1]]
+            vecs.append(np.hstack(feature_list))
+
+        return np.vstack(vecs)
+
     def get_cur_region_stop_car_num(self, region_id):
         '''
         get_cur_region_stop_car_num
@@ -460,11 +480,25 @@ class World(object):
         lane_vehicles = self.eng.get_lane_vehicles()
         vehicle_speed = self.eng.get_vehicle_speed()
         total = 0
-        for intersection in self.region_id2intersection_list[region_id]:
+        for intersection_id in self.region_id2intersection_list[region_id]:
             intersection_lanes = []
-            for road in intersection.roads:
-                intersection_lanes += road["lanes"]
-            for lane in intersection_lanes:
+            intersection = self.id2intersection[intersection_id]
+
+            in_lanes = []
+            for road in intersection.in_roads:
+                from_zero = (road["startIntersection"] == intersection.id) if self.RIGHT else (
+                        road["endIntersection"] == intersection.id)
+                for n in range(len(road["lanes"]))[::(1 if from_zero else -1)]:
+                    in_lanes.append(road["id"] + "_" + str(n))
+            out_lanes = []
+            for road in intersection.out_roads:
+                from_zero = (road["endIntersection"] == intersection.id) if self.RIGHT else (
+                        road["startIntersection"] == intersection.id)
+                for n in range(len(road["lanes"]))[::(1 if from_zero else -1)]:
+                    out_lanes.append(road["id"] + "_" + str(n))
+
+            for lane in (out_lanes + in_lanes):
+                print(lane)
                 for vehicle in lane_vehicles[lane]:
                     if vehicle_speed[vehicle] < 0.1:
                         total += 1
@@ -479,14 +513,28 @@ class World(object):
         :param region: region of the network
         :return: waiting_time of selected region
         '''
+
         lane_waiting_time = self.eng.get_lane_waiting_time_count()
         total = 0
-        for intersection in self.region_id2intersection_list[region_id]:
+        for intersection_id in self.region_id2intersection_list[region_id]:
             intersection_lanes = []
-            for road in intersection.roads:
-                intersection_lanes += road["lanes"]
-            for lane in intersection_lanes:
-                total += lane_waiting_time[lane]
+            intersection = self.id2intersection[intersection_id]
+
+            in_lanes = []
+            for road in intersection.in_roads:
+                from_zero = (road["startIntersection"] == intersection.id) if self.RIGHT else (
+                        road["endIntersection"] == intersection.id)
+                for n in range(len(road["lanes"]))[::(1 if from_zero else -1)]:
+                    in_lanes.append(road["id"] + "_" + str(n))
+            out_lanes = []
+            for road in intersection.out_roads:
+                from_zero = (road["endIntersection"] == intersection.id) if self.RIGHT else (
+                        road["startIntersection"] == intersection.id)
+                for n in range(len(road["lanes"]))[::(1 if from_zero else -1)]:
+                    out_lanes.append(road["id"] + "_" + str(n))
+
+            for lane in (out_lanes + in_lanes):
+                total += lane_waiting_time[lane["id"]]
 
         return total
 

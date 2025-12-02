@@ -16,15 +16,15 @@ print("World loaded successfully.")
 # -------------------------
 transformer = MetaPolicyTransformer(
     d_reg=4,   # 4-dim region features
-    num_regions=4,
-    depth=3,
-    heads=2
+    n_regions=4,
+    n_layers=3,
+    n_heads=2
 )
 
 lstm = MetaPolicyLSTM(
-    input_dim=16,   # flattened region embeddings
-    hidden_dim=256,
-    num_layers=2
+    M=4,   # flattened region embeddings
+    hidden_size=256,
+    d_reg=4
 )
 
 # -------------------------
