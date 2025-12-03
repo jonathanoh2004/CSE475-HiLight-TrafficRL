@@ -21,6 +21,7 @@ class HilightAgent(BaseAgent):
         self.world = world
         self.eng = world.eng
         self.metric = metric
+        self.sub_agents = len(world.intersection_ids) # i think we need this so bc TSCEnv needs the nmber of agents to equal num of intersections
 
         # # ---- Models ----
         # self.meta_transformer = ...
@@ -529,8 +530,9 @@ class HilightAgent(BaseAgent):
 
         return actions, logits, values
     
-    def act(self):
-        """
+
+    def get_action(self, ob=None, phase=None):
+                """
         Returns a dict:
             { intersection_id : chosen_phase }
         matching CityFlow's API requirement.
@@ -546,6 +548,25 @@ class HilightAgent(BaseAgent):
 
         return action_dict
 
+    def get_reward(self):
+        """
+        Simple global reward:
+        reward = - sum of waiting times across all lanes.
+        get_lane_waiting_time_count() -> dict {lane_id: waiting_time}
+        Returns a vector of size (num_intersections,) because TSCEnv
+        expects one reward per sub-agent.
+        """
+        waiting_dict = self.world.get_lane_waiting_time_count()
+
+        # Sum all waiting times
+        total_wait = sum(float(v) for v in waiting_dict.values())
+
+        # Negative reward → less waiting = better
+        reward = -total_wait
+
+        # Broadcast to all intersections (sub-agents)
+        N = int(self.sub_agents)
+        return np.full((N,), reward, dtype=np.float32)
 
 
     def build_gac_input(self, sub_obs):
