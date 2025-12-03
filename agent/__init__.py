@@ -1,3 +1,4 @@
+from .hilight import HilightAgent
 from .base import BaseAgent
 # from .rl_agent import RLAgent
 # from .maxpressure import MaxPressureAgent
@@ -12,6 +13,4 @@ from .base import BaseAgent
 # from .presslight import PressLightAgent
 # from .fixedtime import FixedTimeAgent
 # from .mplight import MPLightAgent
-from .hilight import HilightAgent
-
 # from .ppo_pfrl import IPPO_pfrl

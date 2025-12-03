@@ -716,7 +716,6 @@ class World(object):
         lane_vehicles = self.eng.get_lane_vehicles()
         vehicle_waiting_time = self.get_vehicle_waiting_time()
         for lane in self.all_lanes:
-            print(f"weird shit and stuff {lane}")
             lane_waiting_time[lane] = 0
             for vehicle in lane_vehicles[lane]:
                 lane_waiting_time[lane] += vehicle_waiting_time[vehicle]

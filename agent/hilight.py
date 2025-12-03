@@ -112,6 +112,18 @@ class HilightAgent(BaseAgent):
         self.d_reg = 4
         self.M = 4
 
+        # ---- Region assignment for each intersection ----
+        # 4x4 grid → rows 0–1 = region 0, 2–3 = region 1, etc.
+        self.inter_to_region = []
+        for inter_id in self.world.intersection_ids:
+            x, y = self.world.intersection_id2coords[inter_id]
+            region_x = 0 if x < 2 else 1
+            region_y = 0 if y < 2 else 1
+            region_idx = region_y * 2 + region_x
+            self.inter_to_region.append(region_idx)
+        self.inter_to_region = np.array(self.inter_to_region, dtype=np.int64)
+
+
         self.meta_transformer = MetaPolicyTransformer(
             d_reg=self.d_reg,
             n_regions=self.M,
@@ -520,7 +532,18 @@ class HilightAgent(BaseAgent):
         # -------------------------
         # 4. Sub-policy Actor–Critic
         # -------------------------
-        logits, values = self.sub_policy(z, F_g_t, G_t)
+        # Expand G_t (1,4,4) → (1,N,4) using region mapping
+        B = 1
+        N = z.shape[1]
+        G_expanded = torch.zeros((B, N, self.d_reg), dtype=torch.float32)
+
+        for i in range(N):
+            region_idx = self.inter_to_region[i]
+            G_expanded[0, i, :] = G_t[0, region_idx, :]
+
+        # Now pass into A+C
+        logits, values = self.sub_policy(z, F_g_t, G_expanded)
+
         # logits: (1, N, num_actions)
         # values: (1, N)
 
@@ -532,7 +555,7 @@ class HilightAgent(BaseAgent):
     
 
     def get_action(self, ob=None, phase=None):
-                """
+        """
         Returns a dict:
             { intersection_id : chosen_phase }
         matching CityFlow's API requirement.
@@ -547,6 +570,15 @@ class HilightAgent(BaseAgent):
         action_dict = {iid: actions[i] for i, iid in enumerate(inter_ids)}
 
         return action_dict
+    
+    def get_raw_action(self):
+        """
+        Returns raw action vector (list of ints) in intersection index order.
+        This is the format expected by world.step().
+        """
+        actions, logits, values = self.compute_subpolicy_action()
+        return actions.cpu().numpy().tolist()
+
 
     def get_reward(self):
         """
