@@ -479,10 +479,8 @@ class World(object):
             coords = self.region_id2coords[id]
             feature_list = [stop_car_num, waiting_time, coords[0], coords[1]]
             vecs.append(np.hstack(feature_list))
-            print(vecs[len(vecs)-1].shape)
 
         features = np.vstack(vecs)
-        print("regional features shape: ", features.shape)
         return features
 
     def get_cur_region_stop_car_num(self, region_id):

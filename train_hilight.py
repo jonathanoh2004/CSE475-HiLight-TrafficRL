@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn as nn
 
 from world.world_cityflow import World
 from common.metrics import Metrics
@@ -36,6 +37,8 @@ def train_hilight(num_steps: int = 1000, lr: float = 1e-4):
     world, hi_agent = build_world_and_agent()
 
     optimizer = torch.optim.Adam(hi_agent.parameters(), lr=lr)
+    print("Optimizer initialized with", len(hi_agent.parameters()), "params")
+
 
     print("Starting HiLight training loop...")
 

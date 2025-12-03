@@ -159,6 +159,14 @@ class HilightAgent(BaseAgent):
         # Stores last 20 timesteps of regional features: (4,4) per step
         self.regional_window = deque(maxlen=20)
 
+        self.trainable_modules = [
+            self.local_mlp,
+            self.gac,
+            self.meta_transformer,
+            self.meta_lstm,
+            self.sub_policy
+        ]
+
     def get_ob(self):
 
         """
@@ -624,6 +632,12 @@ class HilightAgent(BaseAgent):
 
         return actions_list, log_prob_mean, value_mean, reward
 
+    def parameters(self):
+        """Return all trainable torch parameters from internal modules."""
+        params = []
+        for module in self.trainable_modules:
+            params += list(module.parameters())
+        return params
 
     def get_action(self, ob=None, phase=None):
         """
