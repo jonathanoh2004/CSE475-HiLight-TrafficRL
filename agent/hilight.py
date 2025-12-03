@@ -117,10 +117,11 @@ class HilightAgent(BaseAgent):
         self.inter_to_region = []
         for inter_id in self.world.intersection_ids:
             x, y = self.world.intersection_id2coords[inter_id]
-            region_x = 0 if x < 2 else 1
-            region_y = 0 if y < 2 else 1
+            region_x = 0 if x < 400 else 1
+            region_y = 0 if y < 400 else 1
             region_idx = region_y * 2 + region_x
             self.inter_to_region.append(region_idx)
+
         self.inter_to_region = np.array(self.inter_to_region, dtype=np.int64)
 
 
@@ -515,44 +516,114 @@ class HilightAgent(BaseAgent):
         # -------------------------
         self.update_regional_window()
 
-        # -------------------------
         # 2. Meta-policy (global & regional guidance)
-        # -------------------------
         F_g_t, G_t = self.compute_meta_policy()
-        # shapes:
-        #   F_g_t : (1, 4)
-        #   G_t   : (1, 4, 4)
 
-        # -------------------------
         # 3. Local features → z
-        # -------------------------
-        z = self.compute_local_features()
-        # z shape: (1, N, 280)
-
-        # -------------------------
-        # 4. Sub-policy Actor–Critic
-        # -------------------------
-        # Expand G_t (1,4,4) → (1,N,4) using region mapping
+        z = self.compute_local_features()    # (1, N, 280)
         B = 1
         N = z.shape[1]
-        G_expanded = torch.zeros((B, N, self.d_reg), dtype=torch.float32)
 
+        if len(self.regional_window) < 20:
+            # No global or subgoal guidance
+            F_g_t = torch.zeros((1, self.d_reg), dtype=torch.float32)
+            G_expanded = torch.zeros((1, N, self.d_reg), dtype=torch.float32)
+
+            logits, values = self.sub_policy(z, F_g_t, G_expanded)
+            dist   = torch.distributions.Categorical(logits=logits)
+            actions = dist.sample().squeeze(0)
+            return actions, logits, values
+
+        # Expand G_t (1,4,4) → (1,N,4)
+        G_expanded = torch.zeros((B, N, self.d_reg), dtype=torch.float32)
         for i in range(N):
             region_idx = self.inter_to_region[i]
             G_expanded[0, i, :] = G_t[0, region_idx, :]
 
-        # Now pass into A+C
         logits, values = self.sub_policy(z, F_g_t, G_expanded)
-
-        # logits: (1, N, num_actions)
-        # values: (1, N)
-
         dist = torch.distributions.Categorical(logits=logits)
-        actions = dist.sample()             # (1, N)
-        actions = actions.squeeze(0)        # → (N,) per intersection
-
+        actions = dist.sample().squeeze(0)
         return actions, logits, values
     
+    def compute_subpolicy_action_with_logprobs(self):
+        """
+        Same pipeline as compute_subpolicy_action(), but also returns
+        per-intersection log-probs and values for training.
+
+        Returns:
+            actions    : (N,) LongTensor
+            log_probs  : (N,) Tensor
+            values     : (N,) Tensor
+        """
+        # 1. Update regional window & meta-policy
+        self.update_regional_window()
+        F_g_t, G_t = self.compute_meta_policy()   # F_g_t: (1,4), G_t: (1,4,4)
+
+        # 2. Local features
+        z = self.compute_local_features()         # (1, N, 280)
+        B = 1
+        N = z.shape[1]
+
+        # 3. Expand G_t (1,4,4) → (1,N,4) via inter_to_region
+        G_expanded = torch.zeros((B, N, self.d_reg),
+                                 dtype=torch.float32,
+                                 device=z.device)
+        for i in range(N):
+            region_idx = self.inter_to_region[i]
+            G_expanded[0, i, :] = G_t[0, region_idx, :]
+
+        # 4. Sub-policy forward
+        logits, values = self.sub_policy(
+            z,
+            F_g_t.to(z.device),
+            G_expanded
+        )  # logits: (1, N, A), values: (1, N)
+
+        dist = torch.distributions.Categorical(logits=logits)
+
+        # Sample actions + log_probs with gradients
+        actions   = dist.sample()          # (1, N)
+        log_probs = dist.log_prob(actions) # (1, N)
+
+        # Squeeze batch dim → (N,)
+        actions   = actions.squeeze(0)
+        log_probs = log_probs.squeeze(0)
+        values    = values.squeeze(0)
+
+        return actions, log_probs, values
+
+    def step_train(self):
+        """
+        One training step:
+          - runs HiLight to choose actions
+          - steps the CityFlow world
+          - computes reward
+          - returns scalars needed for actor-critic loss.
+
+        Returns:
+            actions_list : list[int]      length = #intersections
+            log_prob_mean: scalar Tensor  (mean over intersections)
+            value_mean   : scalar Tensor  (mean over intersections)
+            reward       : float          (mean reward over intersections)
+        """
+        # 1) Policy forward with log-probs & values
+        actions_tensor, log_probs, values = self.compute_subpolicy_action_with_logprobs()
+        # actions_tensor, log_probs, values all shape: (N,)
+
+        # 2) Step simulator using same format as rollout test (list of ints)
+        actions_list = actions_tensor.detach().cpu().numpy().tolist()
+        self.world.step(actions_list)
+
+        # 3) Compute reward vector & scalar
+        reward_vec = self.get_reward()                 # np.array shape (N,)
+        reward     = float(reward_vec.mean())          # scalar for training
+
+        # 4) Collapse log_probs & values over intersections
+        log_prob_mean = log_probs.mean()
+        value_mean    = values.mean()
+
+        return actions_list, log_prob_mean, value_mean, reward
+
 
     def get_action(self, ob=None, phase=None):
         """
@@ -563,12 +634,9 @@ class HilightAgent(BaseAgent):
         actions, logits, values = self.compute_subpolicy_action()
 
         # Convert tensor actions → Python ints
-        actions = actions.cpu().numpy().tolist()   # length N
-
-        # Map back to intersection IDs
-        inter_ids = self.world.intersection_ids
-        action_dict = {iid: actions[i] for i, iid in enumerate(inter_ids)}
-
+        actions = self._clip_actions_to_valid_phases(actions).cpu().numpy().tolist()
+        N = len(self.world.intersection_ids)
+        action_dict = {i: actions[i] for i in range(N)}
         return action_dict
     
     def get_raw_action(self):
@@ -577,7 +645,9 @@ class HilightAgent(BaseAgent):
         This is the format expected by world.step().
         """
         actions, logits, values = self.compute_subpolicy_action()
+        actions = self._clip_actions_to_valid_phases(actions)
         return actions.cpu().numpy().tolist()
+
 
 
     def get_reward(self):
@@ -599,6 +669,13 @@ class HilightAgent(BaseAgent):
         # Broadcast to all intersections (sub-agents)
         N = int(self.sub_agents)
         return np.full((N,), reward, dtype=np.float32)
+    
+    def _clip_actions_to_valid_phases(self, actions_tensor):
+        actions = actions_tensor.clone()
+        for i, inter in enumerate(self.world.intersections):
+            num_phases = len(inter.phases)
+            actions[i] = actions[i] % num_phases
+        return actions
 
 
     def build_gac_input(self, sub_obs):
