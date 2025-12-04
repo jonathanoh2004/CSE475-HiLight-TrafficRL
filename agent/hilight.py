@@ -19,9 +19,16 @@ class HilightAgent(BaseAgent):
     def __init__(self, world, metric, flow_path="flow.json"):
         super().__init__(world)
         self.world = world
+        self.last_total_wait = 0.0
         self.eng = world.eng
         self.metric = metric
         self.sub_agents = len(world.intersection_ids) # i think we need this so bc TSCEnv needs the nmber of agents to equal num of intersections
+
+        self.wait_time_max = 600.0  # seconds or steps; cap
+        self.delay_time_max = 300.0  # same unit as lane_delay
+        self.flow_max = 20.0  # vehicles per step per lane (heuristic)
+        self.max_speed = max(self.world.all_lanes_speed.values())  # from world
+        self.pressure_max = 20.0  # cars; depends on network size
 
         # # ---- Models ----
         # self.meta_transformer = ...
@@ -170,7 +177,6 @@ class HilightAgent(BaseAgent):
         #for testing purposes
         self.inter_id2feature = None
 
-
     def get_ob(self):
 
         """
@@ -199,33 +205,32 @@ class HilightAgent(BaseAgent):
 
         vehicle_distance = eng.get_vehicle_distance()
 
-        vehicle_speed = eng.get_vehicle_speed()  
+        vehicle_speed = eng.get_vehicle_speed()
 
         vehicle_wait_time = world.get_vehicle_waiting_time()
 
         # flow: number of vehicles passing through per unit time
-        lane_flow = world.info_functions["throughput"]() 
-        
+        lane_flow = world.info_functions["throughput"]()
+
         # pressure: vehicle count difference between incoming and corresponding
-        # outgoing lanes. 
-        lane_pressure = world.get_lane_pressure()  
+        # outgoing lanes.
+        lane_pressure = world.get_lane_pressure()
 
         # delay_time: actual − ideal travel time per lane (assumed to be provided)
-        lane_delay = world.info_functions["lane_delay"]()  
+        lane_delay = world.info_functions["lane_delay"]()
 
         # ---------- BUILD PER-LANE FEATURES ----------
         sub_obs_list = []
-
-        # For testing purposes
-        self.inter_id2feature = {id_: {} for id_ in world.intersection_ids}
 
         for inter_id in world.intersection_ids:
 
             lane_ids = self.inter_in_lanes[inter_id]
             lane_feat_list = []
+
             for lane_id in lane_ids:
                 # lane capacity (for occupancy & normalized stop_car_num)
                 cap = max(self.lane_capacity.get(lane_id, 1), 1)
+                lane_len = float(self.world.lane_length.get(lane_id, 1.0))
 
                 # 1) car_num: total # of vehicles on this lane
                 car_num = int(lane_vehicle_count.get(lane_id, 0))
@@ -236,7 +241,7 @@ class HilightAgent(BaseAgent):
 
                 if queue_vids:
                     distances = [vehicle_distance.get(vid, 0.0) for vid in queue_vids]
-                    q_len = max(distances)                       # actual queue length in meters
+                    q_len = max(distances)  # actual queue length in meters
                 else:
                     q_len = 0.0
 
@@ -273,23 +278,57 @@ class HilightAgent(BaseAgent):
                 # 9) delay_time: actual travel time − ideal travel time
                 delay_time = float(lane_delay.get(lane_id, 0.0))
 
+                # norm
+                car_num_norm = car_num / float(cap)
+                queue_norm = q_len / lane_len
+
+                # flow → [0,1]
+                fl_norm = 0.0
+                if self.flow_max > 0:
+                    fl_norm = min(fl / self.flow_max, 1.0)
+
+                # stop_car_num already normalized
+                stop_norm = stop_car_num  # optionally clip to [0,1]
+
+                # waiting time → [0,1]
+                if self.wait_time_max > 0:
+                    waiting_norm = min(waiting_time / self.wait_time_max, 1.0)
+                else:
+                    waiting_norm = waiting_time
+
+                # speed → [0,1]
+                if self.max_speed > 0:
+                    speed_norm = avg_speed / self.max_speed
+                else:
+                    speed_norm = 0.0
+
+                # pressure → [-1,1]
+                if self.pressure_max > 0:
+                    pressure_norm = np.clip(pressure / self.pressure_max, -1.0, 1.0)
+                else:
+                    pressure_norm = pressure
+
+                # delay → [0,1]
+                if self.delay_time_max > 0:
+                    delay_norm = min(delay_time / self.delay_time_max, 1.0)
+                else:
+                    delay_norm = delay_time
+
                 lane_feat = [
-                    car_num,        # car_num [0]
-                    q_len,          # queue_length [1]
-                    occupancy,      # occupancy [2]
-                    fl,             # flow [3]
-                    stop_car_num,   # stop_car_num [4]
-                    waiting_time,   # waiting_time [5]
-                    avg_speed,      # average_speed [6]
-                    pressure,       # pressure [7]
-                    delay_time,     # delay_time [8]
+                    car_num_norm,  # car_num [0]
+                    queue_norm,  # queue_length [1]
+                    occupancy,  # occupancy [2]
+                    fl_norm,  # flow [3]
+                    stop_car_num,  # stop_car_num [4]
+                    waiting_norm,  # waiting_time [5]
+                    speed_norm,  # average_speed [6]
+                    pressure_norm,  # pressure [7]
+                    delay_norm,  # delay_time [8]
                 ]
                 lane_feat_list.append(lane_feat)
 
             inter_feat = np.array(lane_feat_list, dtype=np.float32)
             sub_obs_list.append(inter_feat)
-
-
 
         # ---------- PAD & STACK TO FIXED SHAPE (num_inters, max_lanes, 9) ----------
         num_inters = len(world.intersection_ids)
@@ -691,10 +730,53 @@ class HilightAgent(BaseAgent):
         Returns a vector of size (num_intersections,) because TSCEnv
         expects one reward per sub-agent.
         """
+        """
+        # Reuse the obs pipeline you already have
+        ob = self.get_ob()
+        sub_obs = ob["sub_obs"]  # (N, max_lanes, 9)
+
+        # Indices in lane_feat:
+        # [4] stop_car_num, [5] waiting_time, [0] car_num
+        waiting = sub_obs[:, :, 5]  # (N, max_lanes)
+        stop = sub_obs[:, :, 4]  # (N, max_lanes)
+        car_num = sub_obs[:, :, 0]  # (N, max_lanes) for masking
+        
+        # Only count lanes that actually have cars
+        lane_mask = car_num > 0
+
+        # Sum per intersection
+        inter_wait = (waiting * lane_mask).sum(axis=1)  # (N,)
+        inter_stop = (stop * lane_mask).sum(axis=1)  # (N,)
+
+        beta = 1.0  # weight for stop_car_num; tune as needed
+
+        reward_vec = -(inter_wait + beta * inter_stop)  # (N,)
+
+        return reward_vec.astype(np.float32)
+        """
+
         waiting_dict = self.world.get_lane_waiting_time_count()
 
         # Sum all waiting times
         total_wait = sum(float(v) for v in waiting_dict.values())
+
+        delta_wait = total_wait - self.last_total_wait
+        self.last_total_wait = total_wait
+
+        # Negative delta: if waiting time grows, reward is negative; if shrinks, reward is positive
+        N = int(self.sub_agents)
+        if N <= 0:
+            N = 1
+
+        # Normalize by number of intersections to keep the scale
+        reward_scalar = -delta_wait / float(N * 100.0)
+        reward_scalar = max(min(reward_scalar, 10.0), -10.0)
+
+        # Broadcast same global reward to all intersections
+        reward_vec = np.full((N,), reward_scalar, dtype=np.float32)
+        return reward_vec
+
+        """
 
         # Negative reward → less waiting = better
         reward = -total_wait
@@ -702,6 +784,7 @@ class HilightAgent(BaseAgent):
         # Broadcast to all intersections (sub-agents)
         N = int(self.sub_agents)
         return np.full((N,), reward, dtype=np.float32)
+        """
     
     def _clip_actions_to_valid_phases(self, actions_tensor):
         actions = actions_tensor.clone()

@@ -11,6 +11,7 @@ import os
 import torch
 import numpy as np
 
+from train_hilight import train_hilight
 from world.world_cityflow import World
 from common.metrics import Metrics
 from common.registry import Registry
@@ -52,6 +53,8 @@ def run_rollout(num_steps=30):
     if hasattr(agent, "regional_window"):
         agent.regional_window.clear()
 
+    train_hilight()
+
     for t in range(num_steps):
 
         # 1) Compute full HiLight action (meta-policy + GAC + sub-policy)
@@ -78,4 +81,4 @@ def run_rollout(num_steps=30):
 
 
 if __name__ == "__main__":
-    run_rollout(num_steps=200)
+    run_rollout(num_steps=300)
