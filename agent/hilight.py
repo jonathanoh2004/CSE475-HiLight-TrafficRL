@@ -23,23 +23,15 @@ class HilightAgent(BaseAgent):
         self.metric = metric
         self.sub_agents = len(world.intersection_ids) # i think we need this so bc TSCEnv needs the nmber of agents to equal num of intersections
 
-        # # ---- Models ----
-        # self.meta_transformer = ...
-        # self.meta_lstm = ...
-        # self.local_mlp = ...
-        # self.gat = ...
-        # self.actor = ...
-        # self.critic = ...
+        # normalization hyperparam, hypertine these later
+        self.wait_time_max   = 600.0    # seconds or steps; cap
+        self.delay_time_max  = 300.0    # same unit as lane_delay
+        self.flow_max        = 20.0     # vehicles per step per lane (heuristic)
+        self.max_speed       = max(self.world.all_lanes_speed.values())  # from world
+        self.pressure_max    = 20.0     # cars; depends on network size
 
-        # # ---- Buffers ----
-        # self.regional_window = deque(maxlen=20)
-        # self.sub_buffer = ReplayBuffer(...)
-        # self.meta_buffer = ReplayBuffer(...)
-
-        # # ---- Bookkeeping ----
-        # self.current_goal = None
-        # self.current_step = 0
-        # self.meta_interval = 5
+        self.prev_total_wait = None
+        self.reward_scale = 0.001 
         
         # --- load vehicle length & minGap from agent config ---
         import json, math
@@ -220,6 +212,7 @@ class HilightAgent(BaseAgent):
             for lane_id in lane_ids:
                 # lane capacity (for occupancy & normalized stop_car_num)
                 cap = max(self.lane_capacity.get(lane_id, 1), 1)
+                lane_len = float(self.world.lane_length.get(lane_id, 1.0))
 
                 # 1) car_num: total # of vehicles on this lane
                 car_num = int(lane_vehicle_count.get(lane_id, 0))
@@ -267,16 +260,51 @@ class HilightAgent(BaseAgent):
                 # 9) delay_time: actual travel time − ideal travel time
                 delay_time = float(lane_delay.get(lane_id, 0.0))
 
+                # norm
+                queue_norm = q_len / lane_len
+
+                 # flow → [0,1]
+                fl_norm = 0.0
+                if self.flow_max > 0:
+                    fl_norm = min(fl / self.flow_max, 1.0)
+
+                # stop_car_num already normalized
+                stop_norm = stop_car_num  # optionally clip to [0,1]
+
+                # waiting time → [0,1]
+                if self.wait_time_max > 0:
+                    waiting_norm = min(waiting_time / self.wait_time_max, 1.0)
+                else:
+                    waiting_norm = waiting_time
+
+                # speed → [0,1]
+                if self.max_speed > 0:
+                    speed_norm = avg_speed / self.max_speed
+                else:
+                    speed_norm = 0.0
+
+                # pressure → [-1,1]
+                if self.pressure_max > 0:
+                    pressure_norm = np.clip(pressure / self.pressure_max, -1.0, 1.0)
+                else:
+                    pressure_norm = pressure
+
+                # delay → [0,1]
+                if self.delay_time_max > 0:
+                    delay_norm = min(delay_time / self.delay_time_max, 1.0)
+                else:
+                    delay_norm = delay_time
+
                 lane_feat = [
                     car_num,        # car_num [0]
-                    q_len,          # queue_length [1]
+                    queue_norm,          # queue_length [1]
                     occupancy,      # occupancy [2]
-                    fl,             # flow [3]
+                    fl_norm,             # flow [3]
                     stop_car_num,   # stop_car_num [4]
-                    waiting_time,   # waiting_time [5]
-                    avg_speed,      # average_speed [6]
-                    pressure,       # pressure [7]
-                    delay_time,     # delay_time [8]
+                    waiting_norm,   # waiting_time [5]
+                    speed_norm,      # average_speed [6]
+                    pressure_norm,       # pressure [7]
+                    delay_norm,     # delay_time [8]
                 ]
                 lane_feat_list.append(lane_feat)
 
@@ -663,26 +691,23 @@ class HilightAgent(BaseAgent):
         return actions.cpu().numpy().tolist()
 
 
-
     def get_reward(self):
-        """
-        Simple global reward:
-        reward = - sum of waiting times across all lanes.
-        get_lane_waiting_time_count() -> dict {lane_id: waiting_time}
-        Returns a vector of size (num_intersections,) because TSCEnv
-        expects one reward per sub-agent.
-        """
-        waiting_dict = self.world.get_lane_waiting_time_count()
+        waiting = self.world.get_lane_waiting_time_count()
+        total_wait = sum(float(v) for v in waiting.values()) if isinstance(waiting, dict) else float(waiting)
 
-        # Sum all waiting times
-        total_wait = sum(float(v) for v in waiting_dict.values())
+        if self.prev_total_wait is None:
+            delta = 0.0
+        else:
+            delta = total_wait - self.prev_total_wait
+        self.prev_total_wait = total_wait
 
-        # Negative reward → less waiting = better
-        reward = -total_wait
+        reward_scalar = -float(delta) * float(self.reward_scale)
+        # clip for safety
+        reward_scalar = float(np.clip(reward_scalar, -1e4, 1e4))
 
-        # Broadcast to all intersections (sub-agents)
+        # broadcast to sub_agents
         N = int(self.sub_agents)
-        return np.full((N,), reward, dtype=np.float32)
+        return np.full((N,), reward_scalar, dtype=np.float32)
     
     def _clip_actions_to_valid_phases(self, actions_tensor):
         actions = actions_tensor.clone()
@@ -692,50 +717,82 @@ class HilightAgent(BaseAgent):
         return actions
 
 
-    def build_gac_input(self, sub_obs):
+    def build_gac_input(self, sub_obs, clip=True):
         # sub_obs: (num_inters, max_lanes, 9)
         num_inters, max_lanes, feat_dim = sub_obs.shape
 
         node_features = []
 
-        # iterates through all intersections
         for inter_idx in range(num_inters):
             lanes = sub_obs[inter_idx]  # (max_lanes, 9)
+            # Note: lanes include zero-padding rows for missing lanes
 
             # --- 1) Per-lane part (48 dims) ---
-            lane_core = lanes[:, [1, 2, 4, 5]]      # queue, occupancy, stop, waiting
-            per_lane_flat = lane_core.flatten()     # (max_lanes*4 = 48,), this produces a 1D vector because GAT expects one feature vector per node
+            # pick columns: queue_norm(1), occupancy(2), stop_norm(4), waiting_norm(5)
+            lane_core = lanes[:, [1, 2, 4, 5]]      # (max_lanes, 4)
+            per_lane_flat = lane_core.flatten()     # (max_lanes*4 = 48,)
 
             # --- 2) Per-approach pressure (4 dims) ---
             approach_pressures = []
             for dir in ["N", "E", "S", "W"]:
-                row_idxs = self.inter_approach_lanes[inter_idx][dir]  # list of lane row indices
+                row_idxs = self.inter_approach_lanes[inter_idx][dir]  # list of lane row indices (may be empty)
                 if row_idxs:
-                    p = lanes[row_idxs, 7].sum()   # pressure is column 7
+                    vals = lanes[row_idxs, 7]   # pressure_norm values for those rows (already in [-1,1])
+                    # use mean to keep scale small and consistent
+                    p = float(np.mean(vals))
                 else:
                     p = 0.0
                 approach_pressures.append(p)
             approach_pressures = np.array(approach_pressures, dtype=np.float32)  # (4,)
 
-            # --- 3) Per-intersection scalars (4 dims) ---
-            car_num_inter   = lanes[:, 0].sum()
-            flow_inter      = lanes[:, 3].sum()
-            valid_mask = lanes[:, 0] > 0
-            if valid_mask.any():
-                avg_speed_inter = lanes[valid_mask, 6].mean()
-            else:
-                avg_speed_inter = 0.0
-            delay_inter     = lanes[:, 8].sum()
-            inter_scalars = np.array(
-                [car_num_inter, flow_inter, avg_speed_inter, delay_inter],
-                dtype=np.float32
-            )  # (4,)
+            inter_lane_ids = self.inter_in_lanes[self.world.intersection_ids[inter_idx]]
 
-            # --- 4) concatenate to 56 dims ---
+            # total capacity (avoid zero)
+            total_capacity = max(1, sum(self.lane_capacity.get(lid, 1) for lid in inter_lane_ids))
+
+            # compute raw counts approximated from normalized lanes[:,0] * lane_capacity_if_known
+            raw_car = 0.0
+            raw_flow = 0.0
+            raw_delay = 0.0
+            valid_rows = 0
+            for row_idx, lid in enumerate(inter_lane_ids):
+                if row_idx >= lanes.shape[0]:
+                    break
+                # lanes[row_idx, 0] assumed to be car_num_norm (0..1), lanes[row_idx,3] flow_norm, lanes[row_idx,8] delay_norm
+                lane_cap = max(self.lane_capacity.get(lid, 1), 1)
+                raw_car += lanes[row_idx, 0] * lane_cap
+                raw_flow += lanes[row_idx, 3] * lane_cap
+                raw_delay += lanes[row_idx, 8] * lane_cap
+                valid_rows += 1
+
+            if valid_rows > 0:
+                # normalized absolute sums in [0, 1]
+                car_sum_normed = raw_car / float(total_capacity)
+                flow_sum_normed = raw_flow / float(total_capacity)
+                delay_sum_normed = raw_delay / float(total_capacity)
+            else:
+                car_sum_normed = flow_sum_normed = delay_sum_normed = 0.0
+
+            # average speed per valid lanes (already bounded by max_speed normalization)
+            valid_mask = np.any(lanes != 0.0, axis=1)
+            avg_speed_inter = float(np.mean(lanes[valid_mask, 6])) if valid_mask.any() else 0.0
+
+            inter_scalars = np.array([car_sum_normed, flow_sum_normed, avg_speed_inter, delay_sum_normed], dtype=np.float32)
+            inter_scalars = np.clip(inter_scalars, -1.0, 1.0)
+
+            # optional clipping to stable ranges
+            if clip:
+                # per-lane values should be in [0,1] except pressure in [-1,1]
+                per_lane_flat = np.clip(per_lane_flat, 0.0, 1.0)
+                approach_pressures = np.clip(approach_pressures, -1.0, 1.0)
+                inter_scalars = np.clip(inter_scalars, -10.0, 10.0)  # coarse bound
+
+            # --- 4) final concat to 56 dims ---
             node_feat_56 = np.concatenate(
                 [per_lane_flat, approach_pressures, inter_scalars],
                 axis=-1
             )  # (56,)
+            assert node_feat_56.shape[0] == 56, f"expected 56 dims, got {node_feat_56.shape}"
             node_features.append(node_feat_56)
 
         gac_input = np.stack(node_features, axis=0)  # (num_inters, 56)
