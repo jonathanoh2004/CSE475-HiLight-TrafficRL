@@ -159,6 +159,8 @@ class HilightAgent(BaseAgent):
             self.sub_policy
         ]
 
+        self.inter_id2feature = None
+
     def get_ob(self):
 
         """
@@ -203,6 +205,7 @@ class HilightAgent(BaseAgent):
 
         # ---------- BUILD PER-LANE FEATURES ----------
         sub_obs_list = []
+        self.inter_id2feature = {id_: {} for id_ in world.intersection_ids}
 
         for inter_id in world.intersection_ids:
 
@@ -261,6 +264,8 @@ class HilightAgent(BaseAgent):
                 delay_time = float(lane_delay.get(lane_id, 0.0))
 
                 # norm
+                car_norm = float(car_num) / float(cap)
+
                 queue_norm = q_len / lane_len
 
                  # flow → [0,1]
@@ -296,7 +301,7 @@ class HilightAgent(BaseAgent):
                     delay_norm = delay_time
 
                 lane_feat = [
-                    car_num,        # car_num [0]
+                    car_norm,        # car_num [0]
                     queue_norm,          # queue_length [1]
                     occupancy,      # occupancy [2]
                     fl_norm,             # flow [3]
@@ -482,7 +487,18 @@ class HilightAgent(BaseAgent):
         region_feat = self.world.get_region_features()    # numpy (4,4)
         region_feat = torch.tensor(region_feat, dtype=torch.float32)
 
-        self.regional_window.append(region_feat)          # maintain length 20
+        mins = region_feat.min(dim=0, keepdim=True).values
+        maxs = region_feat.max(dim=0, keepdim=True).values
+        range_vals = (maxs - mins).clamp(min=1e-6)
+
+        # Normalize to [0,1]
+        norm01 = (region_feat - mins) / range_vals
+
+        # Scale to [-1,1]
+        norm11 = norm01 * 2 - 1
+
+        #self.regional_window.append(region_feat)          # maintain length 20
+        self.regional_window.append(norm11)          # maintain length 20
 
     def compute_meta_policy(self):
         """
