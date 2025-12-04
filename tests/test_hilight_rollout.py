@@ -67,11 +67,15 @@ def run_rollout(num_steps=30):
         inter_ids = world.intersection_ids
         sample_actions = [(inter_ids[i], actions[i]) for i in range(min(3, len(inter_ids)))]
 
+        average_delay = agent.metric.delay()
+        average_travel_time = agent.metric.real_average_travel_time()
         print(f"Step {t:03d} | actions: {sample_actions} | "
-              f"reward[0]={float(reward_vec[0]):.3f}")
+              f"reward[0]={float(reward_vec[0]):.3f} | ADT={average_delay:.3f} | ATT={average_travel_time:.3f}")
+
+
 
     print("\n=== Rollout Finished ===\n")
 
 
 if __name__ == "__main__":
-    run_rollout(num_steps=30)
+    run_rollout(num_steps=200)

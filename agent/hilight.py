@@ -167,6 +167,10 @@ class HilightAgent(BaseAgent):
             self.sub_policy
         ]
 
+        #for testing purposes
+        self.inter_id2feature = None
+
+
     def get_ob(self):
 
         """
@@ -212,11 +216,13 @@ class HilightAgent(BaseAgent):
         # ---------- BUILD PER-LANE FEATURES ----------
         sub_obs_list = []
 
+        # For testing purposes
+        self.inter_id2feature = {id_: {} for id_ in world.intersection_ids}
+
         for inter_id in world.intersection_ids:
 
             lane_ids = self.inter_in_lanes[inter_id]
             lane_feat_list = []
-
             for lane_id in lane_ids:
                 # lane capacity (for occupancy & normalized stop_car_num)
                 cap = max(self.lane_capacity.get(lane_id, 1), 1)
@@ -283,6 +289,8 @@ class HilightAgent(BaseAgent):
             inter_feat = np.array(lane_feat_list, dtype=np.float32)
             sub_obs_list.append(inter_feat)
 
+
+
         # ---------- PAD & STACK TO FIXED SHAPE (num_inters, max_lanes, 9) ----------
         num_inters = len(world.intersection_ids)
         max_lanes = max(feat.shape[0] for feat in sub_obs_list)
@@ -310,7 +318,6 @@ class HilightAgent(BaseAgent):
             y = inter["point"]["y"]
             inter_coord[iid] = (x, y)
         self.inter_coord = inter_coord #This line was added for the GAC
-
         # 2) intersection id -> index in sub_obs (0..num_inters-1)
         inter_id_to_idx = {iid: idx for idx, iid in enumerate(self.world.intersection_ids)}
         self.inter_id_to_idx = inter_id_to_idx
@@ -452,9 +459,21 @@ class HilightAgent(BaseAgent):
         The window becomes a (T, 4, 4) list-like buffer.
         """
         region_feat = self.world.get_region_features()    # numpy (4,4)
+
         region_feat = torch.tensor(region_feat, dtype=torch.float32)
 
-        self.regional_window.append(region_feat)          # maintain length 20
+        mins = region_feat.min(dim=0, keepdim=True).values
+        maxs = region_feat.max(dim=0, keepdim=True).values
+        range_vals = (maxs - mins).clamp(min=1e-6)
+
+        # Normalize to [0,1]
+        norm01 = (region_feat - mins) / range_vals
+
+        # Scale to [-1,1]
+        norm11 = norm01 * 2 - 1
+
+        #self.regional_window.append(region_feat)          # maintain length 20
+        self.regional_window.append(norm11)          # maintain length 20
 
     def compute_meta_policy(self):
         """
